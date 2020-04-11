@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2013 Karl Trygve Kalleberg <karltk@boblycat.org>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -208,6 +208,9 @@ gum_v8_script_dispose (GObject * object)
   }
   else
   {
+    if (self->state == GUM_SCRIPT_STATE_UNLOADED && self->context != NULL)
+      gum_v8_script_destroy_context (self);
+
     self->isolate = NULL;
 
     g_clear_pointer (&self->main_context, g_main_context_unref);
@@ -352,11 +355,12 @@ gum_v8_script_create_context (GumV8Script * self,
     _gum_v8_stalker_realize (&self->stalker);
 
     auto resource_name_str = g_strconcat ("/", self->name, ".js", NULL);
-    auto resource_name = String::NewFromUtf8 (isolate, resource_name_str);
+    auto resource_name = String::NewFromUtf8 (isolate, resource_name_str)
+        .ToLocalChecked ();
     ScriptOrigin origin (resource_name);
     g_free (resource_name_str);
 
-    auto source = String::NewFromUtf8 (isolate, self->source);
+    auto source = String::NewFromUtf8 (isolate, self->source).ToLocalChecked ();
 
     TryCatch trycatch (isolate);
     auto maybe_code = Script::Compile (context, source, &origin);
@@ -367,8 +371,8 @@ gum_v8_script_create_context (GumV8Script * self,
     }
     else
     {
-      Handle<Message> message = trycatch.Message ();
-      Handle<Value> exception = trycatch.Exception ();
+      Local<Message> message = trycatch.Message ();
+      Local<Value> exception = trycatch.Exception ();
       String::Utf8Value exception_str (isolate, exception);
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Script(line %d): %s",
           message->GetLineNumber (context).FromMaybe (-1), *exception_str);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2016-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -75,6 +75,9 @@ struct GumCpuContextWrapper
   GumCpuContext * cpu_context;
 };
 
+static void gum_delete_heap_allocation (void * data, size_t length,
+    void * deleter_data);
+
 static void gum_v8_native_resource_on_weak_notify (
     const WeakCallbackInfo<GumV8NativeResource> & info);
 static void gum_v8_kernel_resource_on_weak_notify (
@@ -93,6 +96,7 @@ _gum_v8_args_parse (const GumV8Args * args,
   auto info = args->info;
   auto core = args->core;
   auto isolate = info->GetIsolate ();
+  auto context = isolate->GetCurrentContext ();
   GumV8ArgsParseScope scope;
   va_list ap;
   int arg_index, arg_count = info->Length ();
@@ -440,8 +444,12 @@ _gum_v8_args_parse (const GumV8Args * args,
             Local<Function> func_js;
             gpointer func_c;
 
-            auto value = callbacks->Get (
-                _gum_v8_string_new_ascii (isolate, name));
+            Local<Value> value;
+            if (!callbacks->Get (context,
+                _gum_v8_string_new_ascii (isolate, name)).ToLocal (&value))
+            {
+              return FALSE;
+            }
             if (value->IsFunction ())
             {
               func_js = value.As<Function> ();
@@ -594,8 +602,25 @@ _gum_v8_string_new_ascii (Isolate * isolate,
       NewStringType::kNormal).ToLocalChecked ();
 }
 
+Local<ArrayBuffer>
+_gum_v8_array_buffer_new_take (Isolate * isolate,
+                               gpointer data,
+                               gsize size)
+{
+  return ArrayBuffer::New (isolate, ArrayBuffer::NewBackingStore (data, size,
+      gum_delete_heap_allocation, data));
+}
+
+static void
+gum_delete_heap_allocation (void * data,
+                            size_t length,
+                            void * deleter_data)
+{
+  g_free (deleter_data);
+}
+
 GBytes *
-_gum_v8_bytes_get (Handle<Value> value,
+_gum_v8_bytes_get (Local<Value> value,
                    GumV8Core * core)
 {
   auto result = _gum_v8_bytes_try_get (value, core);
@@ -609,7 +634,7 @@ _gum_v8_bytes_get (Handle<Value> value,
 }
 
 GBytes *
-_gum_v8_bytes_parse (Handle<Value> value,
+_gum_v8_bytes_parse (Local<Value> value,
                      GumV8Core * core)
 {
   if (value->IsString ())
@@ -623,13 +648,13 @@ _gum_v8_bytes_parse (Handle<Value> value,
 }
 
 GBytes *
-_gum_v8_bytes_try_get (Handle<Value> value,
+_gum_v8_bytes_try_get (Local<Value> value,
                        GumV8Core * core)
 {
   if (value->IsArrayBuffer ())
   {
-    auto contents = value.As<ArrayBuffer> ()->GetContents ();
-    return g_bytes_new (contents.Data (), contents.ByteLength ());
+    auto store = value.As<ArrayBuffer> ()->GetBackingStore ();
+    return g_bytes_new (store->Data (), store->ByteLength ());
   }
 
   if (value->IsArrayBufferView ())
@@ -776,7 +801,7 @@ gum_v8_kernel_resource_on_weak_notify (
 }
 
 gboolean
-_gum_v8_int_get (Handle<Value> value,
+_gum_v8_int_get (Local<Value> value,
                  gint * i,
                  GumV8Core * core)
 {
@@ -793,7 +818,7 @@ _gum_v8_int_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_uint_get (Handle<Value> value,
+_gum_v8_uint_get (Local<Value> value,
                   guint * u,
                   GumV8Core * core)
 {
@@ -825,7 +850,7 @@ _gum_v8_int64_new (gint64 value,
 }
 
 gboolean
-_gum_v8_int64_get (Handle<Value> value,
+_gum_v8_int64_get (Local<Value> value,
                    gint64 * i,
                    GumV8Core * core)
 {
@@ -849,7 +874,7 @@ _gum_v8_int64_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_int64_parse (Handle<Value> value,
+_gum_v8_int64_parse (Local<Value> value,
                      gint64 * i,
                      GumV8Core * core)
 {
@@ -896,7 +921,7 @@ _gum_v8_uint64_new (guint64 value,
 }
 
 gint64
-_gum_v8_int64_get_value (Handle<Object> object)
+_gum_v8_int64_get_value (Local<Object> object)
 {
 #if GLIB_SIZEOF_VOID_P == 8
   union
@@ -930,7 +955,7 @@ _gum_v8_int64_get_value (Handle<Object> object)
 }
 
 void
-_gum_v8_int64_set_value (Handle<Object> object,
+_gum_v8_int64_set_value (Local<Object> object,
                          gint64 value,
                          Isolate * isolate)
 {
@@ -967,7 +992,7 @@ _gum_v8_int64_set_value (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_uint64_get (Handle<Value> value,
+_gum_v8_uint64_get (Local<Value> value,
                     guint64 * u,
                     GumV8Core * core)
 {
@@ -991,7 +1016,7 @@ _gum_v8_uint64_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_uint64_parse (Handle<Value> value,
+_gum_v8_uint64_parse (Local<Value> value,
                       guint64 * u,
                       GumV8Core * core)
 {
@@ -1028,7 +1053,7 @@ _gum_v8_uint64_parse (Handle<Value> value,
 }
 
 guint64
-_gum_v8_uint64_get_value (Handle<Object> object)
+_gum_v8_uint64_get_value (Local<Object> object)
 {
 #if GLIB_SIZEOF_VOID_P == 8
   union
@@ -1055,7 +1080,7 @@ _gum_v8_uint64_get_value (Handle<Object> object)
 }
 
 void
-_gum_v8_uint64_set_value (Handle<Object> object,
+_gum_v8_uint64_set_value (Local<Object> object,
                           guint64 value,
                           Isolate * isolate)
 {
@@ -1085,7 +1110,7 @@ _gum_v8_uint64_set_value (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_size_get (Handle<Value> value,
+_gum_v8_size_get (Local<Value> value,
                   gsize * size,
                   GumV8Core * core)
 {
@@ -1127,7 +1152,7 @@ _gum_v8_size_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_ssize_get (Handle<Value> value,
+_gum_v8_ssize_get (Local<Value> value,
                    gssize * size,
                    GumV8Core * core)
 {
@@ -1175,7 +1200,7 @@ _gum_v8_native_pointer_new (gpointer address,
 }
 
 gboolean
-_gum_v8_native_pointer_get (Handle<Value> value,
+_gum_v8_native_pointer_get (Local<Value> value,
                             gpointer * ptr,
                             GumV8Core * core)
 {
@@ -1191,18 +1216,19 @@ _gum_v8_native_pointer_get (Handle<Value> value,
   }
   else
   {
+    auto context = isolate->GetCurrentContext ();
+
     /* Cannot use isObject() here as that returns false for proxies */
     MaybeLocal<Object> maybe_obj;
     {
       TryCatch trycatch (isolate);
-      maybe_obj = value->ToObject (isolate);
+      maybe_obj = value->ToObject (context);
       trycatch.Reset ();
     }
 
     Local<Object> obj;
     if (maybe_obj.ToLocal (&obj))
     {
-      auto context = isolate->GetCurrentContext ();
       auto handle_key (Local<String>::New (isolate, *core->handle_key));
       if (obj->Has (context, handle_key).FromJust ())
       {
@@ -1226,7 +1252,7 @@ _gum_v8_native_pointer_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_native_pointer_parse (Handle<Value> value,
+_gum_v8_native_pointer_parse (Local<Value> value,
                               gpointer * ptr,
                               GumV8Core * core)
 {
@@ -1319,8 +1345,8 @@ void
 _gum_v8_throw_literal (Isolate * isolate,
                        const gchar * message)
 {
-  isolate->ThrowException (Exception::Error (String::NewFromUtf8 (isolate,
-      message)));
+  isolate->ThrowException (Exception::Error (
+      String::NewFromUtf8 (isolate, message).ToLocalChecked ()));
 }
 
 void
@@ -1365,7 +1391,8 @@ _gum_v8_parse_exception_details (GumExceptionDetails * details,
                                  GumV8Core * core)
 {
   auto message = gum_exception_details_to_string (details);
-  auto ex = Exception::Error (String::NewFromUtf8 (core->isolate, message))
+  auto ex = Exception::Error (
+      String::NewFromUtf8 (core->isolate, message).ToLocalChecked ())
       .As<Object> ();
   g_free (message);
 
@@ -1479,7 +1506,7 @@ gum_cpu_context_on_weak_notify (
 }
 
 gboolean
-_gum_v8_cpu_context_get (Handle<Value> value,
+_gum_v8_cpu_context_get (Local<Value> value,
                          GumCpuContext ** context,
                          GumV8Core * core)
 {
@@ -1527,9 +1554,9 @@ _gum_v8_memory_operation_to_string (GumMemoryOperation operation)
 }
 
 gboolean
-_gum_v8_object_set (Handle<Object> object,
+_gum_v8_object_set (Local<Object> object,
                     const gchar * key,
-                    Handle<Value> value,
+                    Local<Value> value,
                     GumV8Core * core)
 {
   auto success = object->Set (core->isolate->GetCurrentContext (),
@@ -1538,7 +1565,7 @@ _gum_v8_object_set (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_int (Handle<Object> object,
+_gum_v8_object_set_int (Local<Object> object,
                         const gchar * key,
                         gint value,
                         GumV8Core * core)
@@ -1550,7 +1577,7 @@ _gum_v8_object_set_int (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_uint (Handle<Object> object,
+_gum_v8_object_set_uint (Local<Object> object,
                          const gchar * key,
                          guint value,
                          GumV8Core * core)
@@ -1562,7 +1589,7 @@ _gum_v8_object_set_uint (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_pointer (Handle<Object> object,
+_gum_v8_object_set_pointer (Local<Object> object,
                             const gchar * key,
                             gpointer value,
                             GumV8Core * core)
@@ -1574,7 +1601,7 @@ _gum_v8_object_set_pointer (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_pointer (Handle<Object> object,
+_gum_v8_object_set_pointer (Local<Object> object,
                             const gchar * key,
                             GumAddress value,
                             GumV8Core * core)
@@ -1586,7 +1613,7 @@ _gum_v8_object_set_pointer (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_uint64 (Handle<Object> object,
+_gum_v8_object_set_uint64 (Local<Object> object,
                             const gchar * key,
                             GumAddress value,
                             GumV8Core * core)
@@ -1598,7 +1625,7 @@ _gum_v8_object_set_uint64 (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_ascii (Handle<Object> object,
+_gum_v8_object_set_ascii (Local<Object> object,
                           const gchar * key,
                           const gchar * value,
                           GumV8Core * core)
@@ -1608,19 +1635,19 @@ _gum_v8_object_set_ascii (Handle<Object> object,
 }
 
 gboolean
-_gum_v8_object_set_utf8 (Handle<Object> object,
+_gum_v8_object_set_utf8 (Local<Object> object,
                          const gchar * key,
                          const gchar * value,
                          GumV8Core * core)
 {
   return _gum_v8_object_set (object,
       key,
-      String::NewFromUtf8 (core->isolate, value),
+      String::NewFromUtf8 (core->isolate, value).ToLocalChecked (),
       core);
 }
 
 gboolean
-_gum_v8_object_set_page_protection (Handle<Object> object,
+_gum_v8_object_set_page_protection (Local<Object> object,
                                     const gchar * key,
                                     GumPageProtection prot,
                                     GumV8Core * core)
@@ -1638,7 +1665,7 @@ _gum_v8_object_set_page_protection (Handle<Object> object,
 }
 
 GArray *
-_gum_v8_memory_ranges_get (Handle<Value> value,
+_gum_v8_memory_ranges_get (Local<Value> value,
                            GumV8Core * core)
 {
   auto isolate = core->isolate;
@@ -1684,7 +1711,7 @@ _gum_v8_memory_ranges_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_memory_range_get (Handle<Value> value,
+_gum_v8_memory_range_get (Local<Value> value,
                           GumMemoryRange * range,
                           GumV8Core * core)
 {
@@ -1724,7 +1751,7 @@ _gum_v8_memory_range_get (Handle<Value> value,
 }
 
 gboolean
-_gum_v8_page_protection_get (Handle<Value> prot_val,
+_gum_v8_page_protection_get (Local<Value> prot_val,
                              GumPageProtection * prot,
                              GumV8Core * core)
 {
@@ -1766,7 +1793,7 @@ _gum_v8_page_protection_get (Handle<Value> prot_val,
 
 Local<ObjectTemplate>
 _gum_v8_create_module (const gchar * name,
-                       Handle<ObjectTemplate> scope,
+                       Local<ObjectTemplate> scope,
                        Isolate * isolate)
 {
   auto module = ObjectTemplate::New (isolate);
@@ -1775,8 +1802,8 @@ _gum_v8_create_module (const gchar * name,
 }
 
 void
-_gum_v8_module_add (Handle<External> module,
-                    Handle<ObjectTemplate> object,
+_gum_v8_module_add (Local<External> module,
+                    Local<ObjectTemplate> object,
                     const GumV8Property * properties,
                     Isolate * isolate)
 {
@@ -1790,8 +1817,8 @@ _gum_v8_module_add (Handle<External> module,
 }
 
 void
-_gum_v8_module_add (Handle<External> module,
-                    Handle<ObjectTemplate> object,
+_gum_v8_module_add (Local<External> module,
+                    Local<ObjectTemplate> object,
                     const GumV8Function * functions,
                     Isolate * isolate)
 {
@@ -1807,8 +1834,8 @@ _gum_v8_module_add (Handle<External> module,
 Local<FunctionTemplate>
 _gum_v8_create_class (const gchar * name,
                       FunctionCallback ctor,
-                      Handle<ObjectTemplate> scope,
-                      Handle<External> module,
+                      Local<ObjectTemplate> scope,
+                      Local<External> module,
                       Isolate * isolate)
 {
   auto klass = FunctionTemplate::New (isolate, ctor, module);
@@ -1820,9 +1847,9 @@ _gum_v8_create_class (const gchar * name,
 }
 
 void
-_gum_v8_class_add_static (Handle<FunctionTemplate> klass,
+_gum_v8_class_add_static (Local<FunctionTemplate> klass,
                           const GumV8Function * functions,
-                          Handle<External> module,
+                          Local<External> module,
                           Isolate * isolate)
 {
   auto func = functions;
@@ -1835,9 +1862,9 @@ _gum_v8_class_add_static (Handle<FunctionTemplate> klass,
 }
 
 void
-_gum_v8_class_add (Handle<FunctionTemplate> klass,
+_gum_v8_class_add (Local<FunctionTemplate> klass,
                    const GumV8Property * properties,
-                   Handle<External> module,
+                   Local<External> module,
                    Isolate * isolate)
 {
   auto object = klass->InstanceTemplate ();
@@ -1852,9 +1879,9 @@ _gum_v8_class_add (Handle<FunctionTemplate> klass,
 }
 
 void
-_gum_v8_class_add (Handle<FunctionTemplate> klass,
+_gum_v8_class_add (Local<FunctionTemplate> klass,
                    const GumV8Function * functions,
-                   Handle<External> module,
+                   Local<External> module,
                    Isolate * isolate)
 {
   auto proto = klass->PrototypeTemplate ();

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2015 Asger Hautop Drewsen <asgerdrewsen@gmail.com>
  * Copyright (C) 2015 Marc Hartmayer <hello@hartmayer.com>
  *
@@ -15,8 +15,11 @@
 #include "gumv8script-priv.h"
 
 #include <ffi.h>
-#include <gum/gum-init.h>
+#ifdef HAVE_PTRAUTH
+# include <ptrauth.h>
+#endif
 #include <string.h>
+#include <gum/gum-init.h>
 
 #define GUMJS_MODULE_NAME Core
 
@@ -184,8 +187,8 @@ GUMJS_DECLARE_FUNCTION (gumjs_script_set_global_access_handler)
 
 GUMJS_DECLARE_FUNCTION (gumjs_weak_ref_bind)
 GUMJS_DECLARE_FUNCTION (gumjs_weak_ref_unbind)
-static GumV8WeakRef * gum_v8_weak_ref_new (guint id, Handle<Value> target,
-    Handle<Function> callback, GumV8Core * core);
+static GumV8WeakRef * gum_v8_weak_ref_new (guint id, Local<Value> target,
+    Local<Function> callback, GumV8Core * core);
 static void gum_v8_weak_ref_clear (GumV8WeakRef * ref);
 static void gum_v8_weak_ref_free (GumV8WeakRef * ref);
 static void gum_v8_weak_ref_on_weak_notify (
@@ -235,6 +238,9 @@ GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_xor)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_shr)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_shl)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_not)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_sign)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_strip)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_blend)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_compare)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_to_int32)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_to_uint32)
@@ -250,14 +256,14 @@ GUMJS_DECLARE_FUNCTION (gumjs_native_function_invoke)
 GUMJS_DECLARE_FUNCTION (gumjs_native_function_call)
 GUMJS_DECLARE_FUNCTION (gumjs_native_function_apply)
 static gboolean gumjs_native_function_get (
-    const FunctionCallbackInfo<Value> & info, Handle<Object> receiver,
+    const FunctionCallbackInfo<Value> & info, Local<Object> receiver,
     GumV8Core * core, GumV8NativeFunction ** func, GCallback * implementation);
-static GumV8NativeFunction * gumjs_native_function_init (Handle<Object> wrapper,
+static GumV8NativeFunction * gumjs_native_function_init (Local<Object> wrapper,
     const GumV8NativeFunctionParams * params, GumV8Core * core);
 static void gum_v8_native_function_free (GumV8NativeFunction * self);
 static void gum_v8_native_function_invoke (GumV8NativeFunction * self,
     GCallback implementation, const FunctionCallbackInfo<Value> & info,
-    uint32_t argc, Handle<Value> * argv);
+    uint32_t argc, Local<Value> * argv);
 static void gum_v8_native_function_on_weak_notify (
     const WeakCallbackInfo<GumV8NativeFunction> & info);
 
@@ -266,11 +272,11 @@ GUMJS_DECLARE_CONSTRUCTOR (gumjs_system_function_construct)
 static gboolean gum_v8_native_function_params_init (
     GumV8NativeFunctionParams * params, GumV8ReturnValueShape return_shape,
     const GumV8Args * args);
-static gboolean gum_v8_scheduling_behavior_parse (Handle<Value> value,
+static gboolean gum_v8_scheduling_behavior_parse (Local<Value> value,
     GumV8SchedulingBehavior * behavior, Isolate * isolate);
-static gboolean gum_v8_exceptions_behavior_parse (Handle<Value> value,
+static gboolean gum_v8_exceptions_behavior_parse (Local<Value> value,
     GumV8ExceptionsBehavior * behavior, Isolate * isolate);
-static gboolean gum_v8_code_traps_parse (Handle<Value> value,
+static gboolean gum_v8_code_traps_parse (Local<Value> value,
     GumV8CodeTraps * traps, Isolate * isolate);
 
 GUMJS_DECLARE_CONSTRUCTOR (gumjs_native_callback_construct)
@@ -288,32 +294,34 @@ static MaybeLocal<Object> gumjs_source_map_new (const gchar * json,
     GumV8Core * core);
 GUMJS_DECLARE_CONSTRUCTOR (gumjs_source_map_construct)
 GUMJS_DECLARE_FUNCTION (gumjs_source_map_resolve)
-static GumV8SourceMap * gum_v8_source_map_new (Handle<Object> wrapper,
+static GumV8SourceMap * gum_v8_source_map_new (Local<Object> wrapper,
     GumSourceMap * handle, GumV8Core * core);
 static void gum_v8_source_map_free (GumV8SourceMap * self);
 static void gum_v8_source_map_on_weak_notify (
     const WeakCallbackInfo<GumV8SourceMap> & info);
 
 static GumV8ExceptionSink * gum_v8_exception_sink_new (
-    Handle<Function> callback, Isolate * isolate);
+    Local<Function> callback, Isolate * isolate);
 static void gum_v8_exception_sink_free (GumV8ExceptionSink * sink);
 static void gum_v8_exception_sink_handle_exception (GumV8ExceptionSink * self,
-    Handle<Value> exception);
+    Local<Value> exception);
 
-static GumV8MessageSink * gum_v8_message_sink_new (Handle<Function> callback,
+static GumV8MessageSink * gum_v8_message_sink_new (Local<Function> callback,
     Isolate * isolate);
 static void gum_v8_message_sink_free (GumV8MessageSink * sink);
 static void gum_v8_message_sink_post (GumV8MessageSink * self,
     const gchar * message, GBytes * data);
+static void gum_delete_bytes_reference (void * data, size_t length,
+    void * deleter_data);
 
-static gboolean gum_v8_ffi_type_get (GumV8Core * core, Handle<Value> name,
+static gboolean gum_v8_ffi_type_get (GumV8Core * core, Local<Value> name,
     ffi_type ** type, GSList ** data);
-static gboolean gum_v8_ffi_abi_get (GumV8Core * core, Handle<Value> name,
+static gboolean gum_v8_ffi_abi_get (GumV8Core * core, Local<Value> name,
     ffi_abi * abi);
 static gboolean gum_v8_value_to_ffi_type (GumV8Core * core,
-    const Handle<Value> svalue, GumFFIValue * value, const ffi_type * type);
+    const Local<Value> svalue, GumFFIValue * value, const ffi_type * type);
 static gboolean gum_v8_value_from_ffi_type (GumV8Core * core,
-    Handle<Value> * svalue, const GumFFIValue * value, const ffi_type * type);
+    Local<Value> * svalue, const GumFFIValue * value, const ffi_type * type);
 
 static const GumV8Function gumjs_global_functions[] =
 {
@@ -422,6 +430,9 @@ static const GumV8Function gumjs_native_pointer_functions[] =
   { "shr", gumjs_native_pointer_shr },
   { "shl", gumjs_native_pointer_shl },
   { "not", gumjs_native_pointer_not },
+  { "sign", gumjs_native_pointer_sign },
+  { "strip", gumjs_native_pointer_strip },
+  { "blend", gumjs_native_pointer_blend },
   { "compare", gumjs_native_pointer_compare },
   { "toInt32", gumjs_native_pointer_to_int32 },
   { "toUInt32", gumjs_native_pointer_to_uint32 },
@@ -454,7 +465,7 @@ _gum_v8_core_init (GumV8Core * self,
                    GumV8MessageEmitter message_emitter,
                    GumScriptScheduler * scheduler,
                    Isolate * isolate,
-                   Handle<ObjectTemplate> scope)
+                   Local<ObjectTemplate> scope)
 {
   self->script = script;
   self->backend = script->backend;
@@ -685,20 +696,22 @@ _gum_v8_core_realize (GumV8Core * self)
   auto module = External::New (isolate, self);
 
   auto global = context->Global ();
-  global->Set (_gum_v8_string_new_ascii (isolate, "global"), global);
+  global->Set (context, _gum_v8_string_new_ascii (isolate, "global"), global)
+      .Check ();
 
   auto array_buffer = global->Get (context,
       _gum_v8_string_new_ascii (isolate, "ArrayBuffer")).ToLocalChecked ()
       .As<Object> ();
-  array_buffer->Set (_gum_v8_string_new_ascii (isolate, "wrap"),
+  array_buffer->Set (context, _gum_v8_string_new_ascii (isolate, "wrap"),
       Function::New (context, gumjs_array_buffer_wrap, module)
-      .ToLocalChecked ());
+      .ToLocalChecked ()).Check ();
   auto array_buffer_proto = array_buffer->Get (context,
       _gum_v8_string_new_ascii (isolate, "prototype")).ToLocalChecked ()
       .As<Object> ();
-  array_buffer_proto->Set (_gum_v8_string_new_ascii (isolate, "unwrap"),
+  array_buffer_proto->Set (context,
+      _gum_v8_string_new_ascii (isolate, "unwrap"),
       Function::New (context, gumjs_array_buffer_unwrap, module)
-      .ToLocalChecked ());
+      .ToLocalChecked ()).Check ();
 
   self->native_functions = g_hash_table_new_full (NULL, NULL, NULL,
       (GDestroyNotify) gum_v8_native_function_free);
@@ -751,8 +764,8 @@ _gum_v8_core_realize (GumV8Core * self)
       system_error_key);
 
   auto native_return_value = Object::New (isolate);
-  native_return_value->Set (context, value_key, zero).FromJust ();
-  native_return_value->Set (context, system_error_key, zero).FromJust ();
+  native_return_value->Set (context, value_key, zero).Check ();
+  native_return_value->Set (context, system_error_key, zero).Check ();
   self->native_return_value = new GumPersistent<Object>::type (isolate,
       native_return_value);
 
@@ -970,7 +983,7 @@ _gum_v8_core_unpin (GumV8Core * self)
 
 void
 _gum_v8_core_on_unhandled_exception (GumV8Core * self,
-                                     Handle<Value> exception)
+                                     Local<Value> exception)
 {
   if (self->unhandled_exception_sink == NULL)
     return;
@@ -1263,7 +1276,7 @@ gumjs_global_get (Local<Name> property,
 
   auto get (Local<Function>::New (isolate, *self->on_global_get));
   auto recv (Local<Object>::New (isolate, *self->global_receiver));
-  Handle<Value> argv[] = { property };
+  Local<Value> argv[] = { property };
   Local<Value> result;
   if (get->Call (context, recv, G_N_ELEMENTS (argv), argv).ToLocal (&result) &&
       !result->IsUndefined ())
@@ -1286,7 +1299,7 @@ gumjs_global_query (Local<Name> property,
 
   auto get (Local<Function>::New (isolate, *self->on_global_get));
   auto recv (Local<Object>::New (isolate, *self->global_receiver));
-  Handle<Value> argv[] = { property };
+  Local<Value> argv[] = { property };
   Local<Value> result;
   if (get->Call (context, recv, G_N_ELEMENTS (argv), argv).ToLocal (&result) &&
       !result->IsUndefined ())
@@ -1511,8 +1524,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_weak_ref_unbind)
 
 static GumV8WeakRef *
 gum_v8_weak_ref_new (guint id,
-                     Handle<Value> target,
-                     Handle<Function> callback,
+                     Local<Value> target,
+                     Local<Function> callback,
                      GumV8Core * core)
 {
   auto ref = g_slice_new (GumV8WeakRef);
@@ -1890,6 +1903,94 @@ GUM_DEFINE_NATIVE_POINTER_BINARY_OP_IMPL (shl, <<)
 
 GUM_DEFINE_NATIVE_POINTER_UNARY_OP_IMPL (not, ~)
 
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_sign)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value = GUMJS_NATIVE_POINTER_VALUE (info.Holder ());
+
+  gchar * key = NULL;
+  gpointer data = NULL;
+  if (!_gum_v8_args_parse (args, "|sp~", &key, &data))
+    return;
+
+  bool valid = true;
+  if (key == NULL || strcmp (key, "ia") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asia, data);
+  else if (strcmp (key, "ib") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asib, data);
+  else if (strcmp (key, "da") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asda, data);
+  else if (strcmp (key, "db") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asdb, data);
+  else
+    valid = false;
+
+  g_free (key);
+
+  if (!valid)
+  {
+    _gum_v8_throw (isolate, "invalid key");
+    return;
+  }
+
+  info.GetReturnValue ().Set (_gum_v8_native_pointer_new (value, core));
+#else
+  info.GetReturnValue ().Set (info.This ());
+#endif
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_strip)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value = GUMJS_NATIVE_POINTER_VALUE (info.Holder ());
+
+  gchar * key = NULL;
+  if (!_gum_v8_args_parse (args, "|s", &key))
+    return;
+
+  bool valid = true;
+  if (key == NULL || strcmp (key, "ia") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asia);
+  else if (strcmp (key, "ib") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asib);
+  else if (strcmp (key, "da") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asda);
+  else if (strcmp (key, "db") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asdb);
+  else
+    valid = false;
+
+  g_free (key);
+
+  if (!valid)
+  {
+    _gum_v8_throw (isolate, "invalid key");
+    return;
+  }
+
+  info.GetReturnValue ().Set (_gum_v8_native_pointer_new (value, core));
+#else
+  info.GetReturnValue ().Set (info.This ());
+#endif
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_blend)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value = GUMJS_NATIVE_POINTER_VALUE (info.Holder ());
+
+  guint small_integer;
+  if (!_gum_v8_args_parse (args, "u", &small_integer))
+    return;
+
+  value = GSIZE_TO_POINTER (ptrauth_blend_discriminator (value, small_integer));
+
+  info.GetReturnValue ().Set (_gum_v8_native_pointer_new (value, core));
+#else
+  info.GetReturnValue ().Set (info.This ());
+#endif
+}
+
 GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_compare)
 {
   gpointer lhs_ptr = GUMJS_NATIVE_POINTER_VALUE (info.Holder ());
@@ -2000,8 +2101,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_array_buffer_wrap)
 
   if (address != NULL && size > 0)
   {
-    result = ArrayBuffer::New (isolate, address, size,
-        ArrayBufferCreationMode::kExternalized);
+    result = ArrayBuffer::New (isolate, ArrayBuffer::NewBackingStore (address,
+        size, BackingStore::EmptyDeleter, nullptr));
   }
   else
   {
@@ -2020,9 +2121,9 @@ GUMJS_DEFINE_FUNCTION (gumjs_array_buffer_unwrap)
     return;
   }
 
-  auto contents = receiver.As<ArrayBuffer> ()->GetContents ();
+  auto store = receiver.As<ArrayBuffer> ()->GetBackingStore ();
   info.GetReturnValue ().Set (
-      _gum_v8_native_pointer_new (contents.Data (), core));
+      _gum_v8_native_pointer_new (store->Data (), core));
 }
 
 GUMJS_DEFINE_CONSTRUCTOR (gumjs_native_function_construct)
@@ -2176,7 +2277,7 @@ GUMJS_DEFINE_FUNCTION (gumjs_native_function_apply)
 
 static gboolean
 gumjs_native_function_get (const FunctionCallbackInfo<Value> & info,
-                           Handle<Object> receiver,
+                           Local<Object> receiver,
                            GumV8Core * core,
                            GumV8NativeFunction ** func,
                            GCallback * implementation)
@@ -2222,11 +2323,12 @@ gumjs_native_function_get (const FunctionCallbackInfo<Value> & info,
 }
 
 static GumV8NativeFunction *
-gumjs_native_function_init (Handle<Object> wrapper,
+gumjs_native_function_init (Local<Object> wrapper,
                             const GumV8NativeFunctionParams * params,
                             GumV8Core * core)
 {
   auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
   GumV8NativeFunction * func;
   ffi_type * rtype;
   uint32_t nargs_fixed, nargs_total, i;
@@ -2249,7 +2351,9 @@ gumjs_native_function_init (Handle<Object> wrapper,
   func->atypes = g_new (ffi_type *, nargs_total);
   for (i = 0; i != nargs_total; i++)
   {
-    auto type = params->argument_types->Get (i);
+    Local<Value> type;
+    if (!params->argument_types->Get (context, i).ToLocal (&type))
+      goto error;
 
     String::Utf8Value type_utf8 (isolate, type);
     if (strcmp (*type_utf8, "...") == 0)
@@ -2272,11 +2376,8 @@ gumjs_native_function_init (Handle<Object> wrapper,
       if (!gum_v8_ffi_type_get (core, type, atype, &func->data))
         goto error;
 
-      if (is_variadic && *atype == &ffi_type_float)
-      {
-        /* Must be promoted to double in the variadic portion. */
-        *atype = &ffi_type_double;
-      }
+      if (is_variadic)
+        *atype = gum_ffi_maybe_promote_variadic (*atype);
     }
   }
   if (is_variadic)
@@ -2365,7 +2466,7 @@ gum_v8_native_function_invoke (GumV8NativeFunction * self,
                                GCallback implementation,
                                const FunctionCallbackInfo<Value> & info,
                                uint32_t argc,
-                               Handle<Value> * argv)
+                               Local<Value> * argv)
 {
   auto core = (GumV8Core *) info.Data ().As<External> ()->Value ();
   auto script_scope = core->current_scope;
@@ -2465,6 +2566,7 @@ gum_v8_native_function_invoke (GumV8NativeFunction * self,
   auto traps = self->traps;
   auto return_shape = self->return_shape;
   GumExceptorScope exceptor_scope;
+  GumInvocationState invocation_state;
   gint system_error = -1;
 
   {
@@ -2475,6 +2577,9 @@ gum_v8_native_function_invoke (GumV8NativeFunction * self,
     if (exceptions == GUM_V8_EXCEPTIONS_PROPAGATE ||
         gum_exceptor_try (core->exceptor, &exceptor_scope))
     {
+      if (exceptions == GUM_V8_EXCEPTIONS_STEAL)
+        gum_interceptor_save (&invocation_state);
+
       if (scheduling == GUM_V8_SCHEDULING_COOPERATIVE)
       {
         new (unlocker) ScriptUnlocker (core);
@@ -2514,6 +2619,8 @@ gum_v8_native_function_invoke (GumV8NativeFunction * self,
   if (exceptions == GUM_V8_EXCEPTIONS_STEAL &&
       gum_exceptor_catch (core->exceptor, &exceptor_scope))
   {
+    gum_interceptor_restore (&invocation_state);
+
     _gum_v8_throw_native (&exceptor_scope.exception, core);
     return;
   }
@@ -2531,10 +2638,10 @@ gum_v8_native_function_invoke (GumV8NativeFunction * self,
     auto return_value = template_return_value->Clone ();
     return_value->Set (context,
         Local<String>::New (isolate, *core->value_key),
-        result).FromJust ();
+        result).Check ();
     return_value->Set (context,
         Local<String>::New (isolate, *core->system_error_key),
-        Integer::New (isolate, system_error)).FromJust ();
+        Integer::New (isolate, system_error)).Check ();
     info.GetReturnValue ().Set (return_value);
   }
   else
@@ -2600,33 +2707,39 @@ gum_v8_native_function_params_init (GumV8NativeFunctionParams * params,
     {
       Local<Object> options = abi_or_options.As<Object> ();
 
-      auto abi = options->Get (Local<String>::New (isolate, *core->abi_key));
-      if (!abi->IsUndefined ())
-        params->abi = abi;
+      auto context = isolate->GetCurrentContext ();
+      Local<Value> v;
 
-      auto scheduling = options->Get (
-          Local<String>::New (isolate, *core->scheduling_key));
-      if (!scheduling->IsUndefined ())
+      if (!options->Get (context, Local<String>::New (isolate, *core->abi_key))
+          .ToLocal (&v))
+        return FALSE;
+      if (!v->IsUndefined ())
+        params->abi = v;
+
+      if (!options->Get (context, Local<String>::New (isolate,
+          *core->scheduling_key)).ToLocal (&v))
+        return FALSE;
+      if (!v->IsUndefined ())
       {
-        if (!gum_v8_scheduling_behavior_parse (scheduling, &params->scheduling,
-            isolate))
+        if (!gum_v8_scheduling_behavior_parse (v, &params->scheduling, isolate))
           return FALSE;
       }
 
-      auto exceptions = options->Get (
-          Local<String>::New (isolate, *core->exceptions_key));
-      if (!exceptions->IsUndefined ())
+      if (!options->Get (context, Local<String>::New (isolate,
+          *core->exceptions_key)).ToLocal (&v))
+        return FALSE;
+      if (!v->IsUndefined ())
       {
-        if (!gum_v8_exceptions_behavior_parse (exceptions, &params->exceptions,
-            isolate))
+        if (!gum_v8_exceptions_behavior_parse (v, &params->exceptions, isolate))
           return FALSE;
       }
 
-      auto traps = options->Get (
-          Local<String>::New (isolate, *core->traps_key));
-      if (!traps->IsUndefined ())
+      if (!options->Get (context, Local<String>::New (isolate,
+          *core->traps_key)).ToLocal (&v))
+        return FALSE;
+      if (!v->IsUndefined ())
       {
-        if (!gum_v8_code_traps_parse (traps, &params->traps, isolate))
+        if (!gum_v8_code_traps_parse (v, &params->traps, isolate))
           return FALSE;
       }
     }
@@ -2642,7 +2755,7 @@ gum_v8_native_function_params_init (GumV8NativeFunctionParams * params,
 }
 
 static gboolean
-gum_v8_scheduling_behavior_parse (Handle<Value> value,
+gum_v8_scheduling_behavior_parse (Local<Value> value,
                                   GumV8SchedulingBehavior * behavior,
                                   Isolate * isolate)
 {
@@ -2669,7 +2782,7 @@ gum_v8_scheduling_behavior_parse (Handle<Value> value,
 }
 
 static gboolean
-gum_v8_exceptions_behavior_parse (Handle<Value> value,
+gum_v8_exceptions_behavior_parse (Local<Value> value,
                                   GumV8ExceptionsBehavior * behavior,
                                   Isolate * isolate)
 {
@@ -2696,7 +2809,7 @@ gum_v8_exceptions_behavior_parse (Handle<Value> value,
 }
 
 static gboolean
-gum_v8_code_traps_parse (Handle<Value> value,
+gum_v8_code_traps_parse (Local<Value> value,
                          GumV8CodeTraps * traps,
                          Isolate * isolate)
 {
@@ -2724,6 +2837,7 @@ gum_v8_code_traps_parse (Handle<Value> value,
 
 GUMJS_DEFINE_CONSTRUCTOR (gumjs_native_callback_construct)
 {
+  auto context = isolate->GetCurrentContext ();
   Local<Function> func_value;
   Local<Value> rtype_value;
   Local<Array> atypes_array;
@@ -2756,11 +2870,12 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_native_callback_construct)
   callback->atypes = g_new (ffi_type *, nargs);
   for (i = 0; i != nargs; i++)
   {
-    if (!gum_v8_ffi_type_get (core, atypes_array->Get (i),
-        &callback->atypes[i], &callback->data))
-    {
+    Local<Value> v;
+    if (!atypes_array->Get (context, i).ToLocal (&v))
       goto error;
-    }
+
+    if (!gum_v8_ffi_type_get (core, v, &callback->atypes[i], &callback->data))
+      goto error;
   }
 
   abi = FFI_DEFAULT_ABI;
@@ -2970,7 +3085,7 @@ gumjs_source_map_new (const gchar * json,
   auto ctor = Local<FunctionTemplate>::New (isolate, *core->source_map);
 
   Local<Value> args[] = {
-    String::NewFromUtf8 (isolate, json)
+    String::NewFromUtf8 (isolate, json).ToLocalChecked ()
   };
 
   return ctor->GetFunction (context).ToLocalChecked ()
@@ -3024,13 +3139,23 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_source_map_resolve, GumV8SourceMap)
   if (gum_source_map_resolve (self->handle, &line, &column, &source, &name))
   {
     auto result = Array::New (isolate, 4);
-    result->Set (0, String::NewFromUtf8 (isolate, source));
-    result->Set (1, Integer::NewFromUnsigned (isolate, line));
-    result->Set (2, Integer::NewFromUnsigned (isolate, column));
+
+    auto context = isolate->GetCurrentContext ();
+    result->Set (context, 0,
+        String::NewFromUtf8 (isolate, source).ToLocalChecked ()).Check ();
+    result->Set (context, 1, Integer::NewFromUnsigned (isolate, line)).Check ();
+    result->Set (context, 2, Integer::NewFromUnsigned (isolate, column))
+        .Check ();
     if (name != NULL)
-      result->Set (3, String::NewFromUtf8 (isolate, name));
+    {
+      result->Set (context, 3,
+          String::NewFromUtf8 (isolate, name).ToLocalChecked ()).Check ();
+    }
     else
-      result->Set (3, Null (isolate));
+    {
+      result->Set (context, 3, Null (isolate)).Check ();
+    }
+
     info.GetReturnValue ().Set (result);
   }
   else
@@ -3040,7 +3165,7 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_source_map_resolve, GumV8SourceMap)
 }
 
 static GumV8SourceMap *
-gum_v8_source_map_new (Handle<Object> wrapper,
+gum_v8_source_map_new (Local<Object> wrapper,
                        GumSourceMap * handle,
                        GumV8Core * core)
 {
@@ -3076,7 +3201,7 @@ gum_v8_source_map_on_weak_notify (const WeakCallbackInfo<GumV8SourceMap> & info)
 }
 
 static GumV8ExceptionSink *
-gum_v8_exception_sink_new (Handle<Function> callback,
+gum_v8_exception_sink_new (Local<Function> callback,
                            Isolate * isolate)
 {
   auto sink = g_slice_new (GumV8ExceptionSink);
@@ -3095,20 +3220,20 @@ gum_v8_exception_sink_free (GumV8ExceptionSink * sink)
 
 static void
 gum_v8_exception_sink_handle_exception (GumV8ExceptionSink * self,
-                                        Handle<Value> exception)
+                                        Local<Value> exception)
 {
   auto isolate = self->isolate;
   auto context = isolate->GetCurrentContext ();
 
   auto callback (Local<Function>::New (isolate, *self->callback));
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = { exception };
+  Local<Value> argv[] = { exception };
   auto result = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
   _gum_v8_ignore_result (result);
 }
 
 static GumV8MessageSink *
-gum_v8_message_sink_new (Handle<Function> callback,
+gum_v8_message_sink_new (Local<Function> callback,
                          Isolate * isolate)
 {
   auto sink = g_slice_new (GumV8MessageSink);
@@ -3136,10 +3261,13 @@ gum_v8_message_sink_post (GumV8MessageSink * self,
   Local<Value> data_value;
   if (data != NULL)
   {
-    gsize data_size;
-    gpointer data_buffer = g_bytes_unref_to_data (data, &data_size);
-    data_value = ArrayBuffer::New (isolate, data_buffer, data_size,
-        ArrayBufferCreationMode::kInternalized);
+    gpointer base;
+    gsize size;
+
+    base = (gpointer) g_bytes_get_data (data, &size);
+
+    data_value = ArrayBuffer::New (isolate, ArrayBuffer::NewBackingStore (
+        base, size, gum_delete_bytes_reference, data));
   }
   else
   {
@@ -3148,17 +3276,25 @@ gum_v8_message_sink_post (GumV8MessageSink * self,
 
   auto callback (Local<Function>::New (isolate, *self->callback));
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = {
-    String::NewFromUtf8 (isolate, message),
+  Local<Value> argv[] = {
+    String::NewFromUtf8 (isolate, message).ToLocalChecked (),
     data_value
   };
   auto result = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
   _gum_v8_ignore_result (result);
 }
 
+static void
+gum_delete_bytes_reference (void * data,
+                            size_t length,
+                            void * deleter_data)
+{
+  g_bytes_unref ((GBytes *) deleter_data);
+}
+
 static gboolean
 gum_v8_ffi_type_get (GumV8Core * core,
-                     Handle<Value> name,
+                     Local<Value> name,
                      ffi_type ** type,
                      GSList ** data)
 {
@@ -3211,7 +3347,7 @@ gum_v8_ffi_type_get (GumV8Core * core,
 
 static gboolean
 gum_v8_ffi_abi_get (GumV8Core * core,
-                    Handle<Value> name,
+                    Local<Value> name,
                     ffi_abi * abi)
 {
   auto isolate = core->isolate;
@@ -3232,7 +3368,7 @@ gum_v8_ffi_abi_get (GumV8Core * core,
 
 static gboolean
 gum_v8_value_to_ffi_type (GumV8Core * core,
-                          const Handle<Value> svalue,
+                          const Local<Value> svalue,
                           GumFFIValue * value,
                           const ffi_type * type)
 {
@@ -3375,7 +3511,7 @@ error_unsupported_type:
 
 static gboolean
 gum_v8_value_from_ffi_type (GumV8Core * core,
-                            Handle<Value> * svalue,
+                            Local<Value> * svalue,
                             const GumFFIValue * value,
                             const ffi_type * type)
 {
@@ -3431,6 +3567,7 @@ gum_v8_value_from_ffi_type (GumV8Core * core,
   }
   else if (type->type == FFI_TYPE_STRUCT)
   {
+    auto context = isolate->GetCurrentContext ();
     auto field_types = type->elements;
 
     gsize length = 0;
@@ -3451,7 +3588,7 @@ gum_v8_value_from_ffi_type (GumV8Core * core,
       if (gum_v8_value_from_ffi_type (core, &field_svalue, field_value,
           field_type))
       {
-        field_svalues->Set (i, field_svalue);
+        field_svalues->Set (context, i, field_svalue).Check ();
       }
       else
       {

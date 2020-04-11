@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2012-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -202,7 +202,8 @@ gum_v8_event_sink_stop (GumEventSink * sink)
   {
     auto source = g_idle_source_new ();
     g_source_set_callback (source,
-        (GSourceFunc) gum_v8_event_sink_stop_when_idle, sink, NULL);
+        (GSourceFunc) gum_v8_event_sink_stop_when_idle, g_object_ref (self),
+        g_object_unref);
     g_source_attach (source, self->main_context);
     g_source_unref (source);
   }
@@ -235,7 +236,8 @@ gum_v8_event_sink_drain (GumV8EventSink * self)
   gpointer buffer = NULL;
   guint len, size;
 
-  if (self->core == NULL)
+  auto core = self->core;
+  if (core == NULL)
     return FALSE;
 
   len = self->queue->len;
@@ -273,8 +275,8 @@ gum_v8_event_sink_drain (GumV8EventSink * self)
       }
     }
 
-    ScriptScope scope (self->core->script);
-    auto isolate = self->core->isolate;
+    ScriptScope scope (core->script);
+    auto isolate = core->isolate;
     auto context = isolate->GetCurrentContext ();
     auto recv = Undefined (isolate);
 
@@ -291,7 +293,7 @@ gum_v8_event_sink_drain (GumV8EventSink * self)
         sprintf (target_str, "0x%" G_GSIZE_MODIFIER "x",
             GPOINTER_TO_SIZE (target));
         _gum_v8_object_set (summary, target_str,
-            Number::New (isolate, GPOINTER_TO_SIZE (count)), self->core);
+            Number::New (isolate, GPOINTER_TO_SIZE (count)), core);
       }
 
       g_hash_table_unref (frequencies);
@@ -309,17 +311,15 @@ gum_v8_event_sink_drain (GumV8EventSink * self)
     {
       auto on_receive = Local<Function>::New (isolate, *self->on_receive);
       Local<Value> argv[] = {
-        ArrayBuffer::New (isolate, buffer, size,
-            ArrayBufferCreationMode::kInternalized)
+        _gum_v8_array_buffer_new_take (isolate, g_steal_pointer (&buffer),
+            size),
       };
       auto result = on_receive->Call (context, recv, G_N_ELEMENTS (argv), argv);
       if (result.IsEmpty ())
         scope.ProcessAnyPendingException ();
     }
-    else
-    {
-      g_free (buffer);
-    }
+
+    g_free (buffer);
   }
 
   return TRUE;

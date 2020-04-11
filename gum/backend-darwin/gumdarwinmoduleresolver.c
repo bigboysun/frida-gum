@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -94,15 +94,11 @@ gum_darwin_module_resolver_initable_init (GInitable * initable,
   int pid;
   GumCollectModulesContext ctx;
 
-  if (self->task == mach_task_self ())
-  {
-    self->page_size = gum_query_page_size ();
-  }
-  else
-  {
-    if (!gum_darwin_query_page_size (self->task, &self->page_size))
-      goto invalid_task;
-  }
+  if (!gum_darwin_query_ptrauth_support (self->task, &self->ptrauth_support))
+    goto invalid_task;
+
+  if (!gum_darwin_query_page_size (self->task, &self->page_size))
+    goto invalid_task;
 
   if (pid_for_task (self->task, &pid) != KERN_SUCCESS)
     goto invalid_task;
@@ -337,6 +333,14 @@ gum_darwin_module_resolver_resolve_export (
       ? GUM_EXPORT_FUNCTION
       : GUM_EXPORT_VARIABLE;
 
+  if (result->type == GUM_EXPORT_FUNCTION &&
+      self->ptrauth_support == GUM_PTRAUTH_SUPPORTED)
+  {
+    g_assert (gum_query_ptrauth_support () == GUM_PTRAUTH_SUPPORTED);
+
+    result->address = gum_sign_code_address (result->address);
+  }
+
   return TRUE;
 }
 
@@ -355,8 +359,7 @@ gum_store_module (const GumModuleDetails * details,
   }
 
   module = gum_darwin_module_new_from_memory (details->path, self->task,
-      self->cpu_type, self->page_size, details->range->base_address,
-      GUM_DARWIN_MODULE_FLAGS_NONE, NULL);
+      details->range->base_address, GUM_DARWIN_MODULE_FLAGS_NONE, NULL);
   g_hash_table_insert (self->modules, g_strdup (details->name),
       module);
   g_hash_table_insert (self->modules, g_strdup (details->path),

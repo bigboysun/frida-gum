@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2008-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2008 Christian Berentsen <jc.berentsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -98,7 +98,7 @@ struct _InterceptorThreadContext
 
 struct _GumInvocationStackEntry
 {
-  gpointer trampoline_ret_addr;
+  GumFunctionContext * function_ctx;
   gpointer caller_ret_addr;
   GumInvocationContext invocation_context;
   GumCpuContext cpu_context;
@@ -608,11 +608,42 @@ gum_invocation_stack_translate (GumInvocationStack * self,
     GumInvocationStackEntry * entry;
 
     entry = &g_array_index (self, GumInvocationStackEntry, i);
-    if (entry->trampoline_ret_addr == return_address)
+    if (entry->function_ctx->on_leave_trampoline == return_address)
       return entry->caller_ret_addr;
   }
 
   return return_address;
+}
+
+void
+gum_interceptor_save (GumInvocationState * state)
+{
+  *state = gum_interceptor_get_current_stack ()->len;
+}
+
+void
+gum_interceptor_restore (GumInvocationState * state)
+{
+  GumInvocationStack * stack;
+  guint old_depth, new_depth, i;
+
+  stack = gum_interceptor_get_current_stack ();
+
+  old_depth = *state;
+  new_depth = stack->len;
+  if (new_depth == old_depth)
+    return;
+
+  for (i = old_depth; i != new_depth; i++)
+  {
+    GumInvocationStackEntry * entry;
+
+    entry = &g_array_index (stack, GumInvocationStackEntry, i);
+
+    g_atomic_int_dec_and_test (&entry->function_ctx->trampoline_usage_counter);
+  }
+
+  g_array_set_size (stack, old_depth);
 }
 
 gpointer
@@ -641,7 +672,7 @@ _gum_interceptor_translate_top_return_address (gpointer return_address)
     goto fallback;
 
   entry = &g_array_index (stack, GumInvocationStackEntry, stack->len - 1);
-  if (entry->trampoline_ret_addr != return_address)
+  if (entry->function_ctx->on_leave_trampoline != return_address)
     goto fallback;
 
   return entry->caller_ret_addr;
@@ -1191,9 +1222,11 @@ _gum_function_context_begin_invocation (GumFunctionContext * function_ctx,
   stack = interceptor_ctx->stack;
 
   stack_entry = gum_invocation_stack_peek_top (stack);
-  if (stack_entry != NULL && stack_entry->calling_replacement &&
-      stack_entry->invocation_context.function ==
-      function_ctx->function_address)
+  if (stack_entry != NULL &&
+      stack_entry->calling_replacement &&
+      gum_strip_code_pointer (GUM_FUNCPTR_TO_POINTER (
+          stack_entry->invocation_context.function)) ==
+          function_ctx->function_address)
   {
     gum_tls_key_set_value (gum_interceptor_guard_key, NULL);
     *next_hop = function_ctx->on_invoke_trampoline;
@@ -1335,7 +1368,7 @@ _gum_function_context_end_invocation (GumFunctionContext * function_ctx,
   interceptor_ctx = get_interceptor_thread_context ();
 
   stack_entry = gum_invocation_stack_peek_top (interceptor_ctx->stack);
-  *next_hop = stack_entry->caller_ret_addr;
+  *next_hop = gum_sign_code_pointer (stack_entry->caller_ret_addr);
 
   invocation_ctx = &stack_entry->invocation_context;
   invocation_ctx->cpu_context = cpu_context;
@@ -1656,12 +1689,12 @@ gum_invocation_stack_push (GumInvocationStack * stack,
   g_array_set_size (stack, stack->len + 1);
   entry = (GumInvocationStackEntry *)
       &g_array_index (stack, GumInvocationStackEntry, stack->len - 1);
-  entry->trampoline_ret_addr = function_ctx->on_leave_trampoline;
+  entry->function_ctx = function_ctx;
   entry->caller_ret_addr = caller_ret_addr;
 
   ctx = &entry->invocation_context;
-  ctx->function =
-      GUM_POINTER_TO_FUNCPTR (GCallback, function_ctx->function_address);
+  ctx->function = GUM_POINTER_TO_FUNCPTR (GCallback,
+      gum_sign_code_pointer (function_ctx->function_address));
 
   ctx->backend = NULL;
 
@@ -1695,6 +1728,8 @@ static gpointer
 gum_interceptor_resolve (GumInterceptor * self,
                          gpointer address)
 {
+  address = gum_strip_code_pointer (address);
+
   if (!gum_interceptor_has (self, address))
   {
     const gsize max_redirect_size = 16;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -73,7 +73,7 @@ GUMJS_DECLARE_FUNCTION (gumjs_process_enumerate_malloc_ranges)
 GUMJS_DECLARE_FUNCTION (gumjs_process_set_exception_handler)
 
 static GumV8ExceptionHandler * gum_v8_exception_handler_new (
-    Handle<Function> callback, GumV8Core * core);
+    Local<Function> callback, GumV8Core * core);
 static void gum_v8_exception_handler_free (
     GumV8ExceptionHandler * handler);
 static gboolean gum_v8_exception_handler_on_exception (
@@ -99,7 +99,7 @@ void
 _gum_v8_process_init (GumV8Process * self,
                       GumV8Module * module,
                       GumV8Core * core,
-                      Handle<ObjectTemplate> scope)
+                      Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -110,16 +110,16 @@ _gum_v8_process_init (GumV8Process * self,
   process->Set (_gum_v8_string_new_ascii (isolate, "id"),
       Number::New (isolate, gum_process_get_id ()), ReadOnly);
   process->Set (_gum_v8_string_new_ascii (isolate, "arch"),
-      String::NewFromUtf8 (isolate, GUM_SCRIPT_ARCH), ReadOnly);
+      String::NewFromUtf8Literal (isolate, GUM_SCRIPT_ARCH), ReadOnly);
   process->Set (_gum_v8_string_new_ascii (isolate, "platform"),
-      String::NewFromUtf8 (isolate, GUM_SCRIPT_PLATFORM), ReadOnly);
+      String::NewFromUtf8Literal (isolate, GUM_SCRIPT_PLATFORM), ReadOnly);
   process->Set (_gum_v8_string_new_ascii (isolate, "pageSize"),
       Number::New (isolate, gum_query_page_size ()), ReadOnly);
   process->Set (_gum_v8_string_new_ascii (isolate, "pointerSize"),
       Number::New (isolate, GLIB_SIZEOF_VOID_P), ReadOnly);
   process->Set (_gum_v8_string_new_ascii (isolate, "codeSigningPolicy"),
       String::NewFromUtf8 (isolate, gum_code_signing_policy_to_string (
-      gum_process_get_code_signing_policy ())), ReadOnly);
+      gum_process_get_code_signing_policy ())).ToLocalChecked (), ReadOnly);
   _gum_v8_module_add (External::New (isolate, self), process,
       gumjs_process_functions, isolate);
 }
@@ -362,7 +362,7 @@ GUMJS_DEFINE_FUNCTION (gumjs_process_set_exception_handler)
 }
 
 static GumV8ExceptionHandler *
-gum_v8_exception_handler_new (Handle<Function> callback,
+gum_v8_exception_handler_new (Local<Function> callback,
                               GumV8Core * core)
 {
   auto handler = g_slice_new (GumV8ExceptionHandler);
@@ -402,7 +402,7 @@ gum_v8_exception_handler_on_exception (GumExceptionDetails * details,
   _gum_v8_parse_exception_details (details, ex, context, core);
 
   gboolean handled = FALSE;
-  Handle<Value> argv[] = { ex };
+  Local<Value> argv[] = { ex };
   Local<Value> result;
   if (callback->Call (isolate->GetCurrentContext (), Undefined (isolate),
       G_N_ELEMENTS (argv), argv).ToLocal (&result))

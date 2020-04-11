@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -16,6 +16,9 @@
 #include "gumsourcemap.h"
 
 #include <ffi.h>
+#ifdef HAVE_PTRAUTH
+# include <ptrauth.h>
+#endif
 
 #define GUM_DUK_NATIVE_POINTER_CACHE_SIZE 8
 
@@ -215,6 +218,9 @@ GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_xor)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_shr)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_shl)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_not)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_sign)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_strip)
+GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_blend)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_compare)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_to_int32)
 GUMJS_DECLARE_FUNCTION (gumjs_native_pointer_to_uint32)
@@ -404,6 +410,9 @@ static const duk_function_list_entry gumjs_native_pointer_functions[] =
   { "shr", gumjs_native_pointer_shr, 1 },
   { "shl", gumjs_native_pointer_shl, 1 },
   { "not", gumjs_native_pointer_not, 0 },
+  { "sign", gumjs_native_pointer_sign, 2 },
+  { "strip", gumjs_native_pointer_strip, 1 },
+  { "blend", gumjs_native_pointer_blend, 1 },
   { "compare", gumjs_native_pointer_compare, 1 },
   { "toInt32", gumjs_native_pointer_to_int32, 0 },
   { "toUInt32", gumjs_native_pointer_to_uint32, 0 },
@@ -1460,8 +1469,9 @@ GUMJS_DEFINE_GETTER (gumjs_script_get_source_map)
     return 1;
   }
 
-  regex = g_regex_new ("//[#@][ \t]sourceMappingURL=[ \t]*"
-      "data:application/json;.*?base64,([^\\s\'\"]*)[ \t]*$", 0, 0, NULL);
+  regex = g_regex_new ("//[#@][ \\t]sourceMappingURL=[ \\t]*"
+      "data:application/json;.*?base64,([^\\s'\"]*)[ \\t]*$",
+      G_REGEX_MULTILINE, 0, NULL);
   g_regex_match (regex, source, 0, &match_info);
   if (g_match_info_matches (match_info))
   {
@@ -2287,6 +2297,88 @@ GUM_DEFINE_NATIVE_POINTER_BINARY_OP_IMPL (shl, <<)
 
 GUM_DEFINE_NATIVE_POINTER_UNARY_OP_IMPL (not, ~)
 
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_sign)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value;
+  const gchar * key;
+  gpointer data;
+
+  value = gumjs_native_pointer_from_args (args)->value;
+
+  key = "ia";
+  data = NULL;
+  _gum_duk_args_parse (args, "|sp~", &key, &data);
+
+  if (strcmp (key, "ia") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asia, data);
+  else if (strcmp (key, "ib") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asib, data);
+  else if (strcmp (key, "da") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asda, data);
+  else if (strcmp (key, "db") == 0)
+    value = ptrauth_sign_unauthenticated (value, ptrauth_key_asdb, data);
+  else
+    _gum_duk_throw (ctx, "invalid key");
+
+  _gum_duk_push_native_pointer (ctx, value, args->core);
+#else
+  duk_push_this (ctx);
+#endif
+
+  return 1;
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_strip)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value;
+  const gchar * key;
+
+  value = gumjs_native_pointer_from_args (args)->value;
+
+  key = "ia";
+  _gum_duk_args_parse (args, "|s", &key);
+
+  if (strcmp (key, "ia") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asia);
+  else if (strcmp (key, "ib") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asib);
+  else if (strcmp (key, "da") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asda);
+  else if (strcmp (key, "db") == 0)
+    value = ptrauth_strip (value, ptrauth_key_asdb);
+  else
+    _gum_duk_throw (ctx, "invalid key");
+
+  _gum_duk_push_native_pointer (ctx, value, args->core);
+#else
+  duk_push_this (ctx);
+#endif
+
+  return 1;
+}
+
+GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_blend)
+{
+#ifdef HAVE_PTRAUTH
+  gpointer value;
+  guint small_integer;
+
+  value = gumjs_native_pointer_from_args (args)->value;
+
+  _gum_duk_args_parse (args, "u", &small_integer);
+
+  value = GSIZE_TO_POINTER (ptrauth_blend_discriminator (value, small_integer));
+
+  _gum_duk_push_native_pointer (ctx, value, args->core);
+#else
+  duk_push_this (ctx);
+#endif
+
+  return 1;
+}
+
 GUMJS_DEFINE_FUNCTION (gumjs_native_pointer_compare)
 {
   GumDukNativePointer * self;
@@ -2763,11 +2855,8 @@ gumjs_native_function_init (duk_context * ctx,
       if (!gum_duk_get_ffi_type (ctx, atype_value, atype, &func->data))
         goto invalid_argument_type;
 
-      if (is_variadic && *atype == &ffi_type_float)
-      {
-        /* Must be promoted to double in the variadic portion. */
-        *atype = &ffi_type_double;
-      }
+      if (is_variadic)
+        *atype = gum_ffi_maybe_promote_variadic (*atype);
     }
 
     duk_pop (ctx);
@@ -2903,6 +2992,7 @@ gum_duk_native_function_invoke (GumDukNativeFunction * self,
   GumDukCodeTraps traps;
   GumDukReturnValueShape return_shape;
   GumExceptorScope exceptor_scope;
+  GumInvocationState invocation_state;
   gint system_error;
 
   core = self->core;
@@ -3001,6 +3091,9 @@ gum_duk_native_function_invoke (GumDukNativeFunction * self,
     if (exceptions == GUM_DUK_EXCEPTIONS_PROPAGATE ||
         gum_exceptor_try (core->exceptor, &exceptor_scope))
     {
+      if (exceptions == GUM_DUK_EXCEPTIONS_STEAL)
+        gum_interceptor_save (&invocation_state);
+
       if (scheduling == GUM_DUK_SCHEDULING_COOPERATIVE)
       {
         _gum_duk_scope_suspend (&scope);
@@ -3038,6 +3131,8 @@ gum_duk_native_function_invoke (GumDukNativeFunction * self,
   if (exceptions == GUM_DUK_EXCEPTIONS_STEAL &&
       gum_exceptor_catch (core->exceptor, &exceptor_scope))
   {
+    gum_interceptor_restore (&invocation_state);
+
     _gum_duk_throw_native (ctx, &exceptor_scope.exception, core);
   }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -38,7 +38,7 @@
 #define GUM_BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE -1
 #define GUM_BIND_SPECIAL_DYLIB_FLAT_LOOKUP     -2
 
-#define MAX_METADATA_SIZE             (64 * 1024)
+#define GUM_MAX_MACHO_METADATA_SIZE   (64 * 1024)
 
 #define GUM_DARWIN_MODULE_HAS_HEADER_ONLY(self) \
     ((self->flags & GUM_DARWIN_MODULE_FLAGS_HEADER_ONLY) != 0)
@@ -82,7 +82,7 @@ enum
   PROP_UUID,
   PROP_TASK,
   PROP_CPU_TYPE,
-  PROP_PAGE_SIZE,
+  PROP_PTRAUTH_SUPPORT,
   PROP_BASE_ADDRESS,
   PROP_SOURCE_PATH,
   PROP_SOURCE_BLOB,
@@ -102,6 +102,10 @@ struct _GumEmitImportContext
   gpointer user_data;
 
   GumDarwinModule * module;
+  GArray * threaded_binds;
+  const guint8 * source_start;
+  const guint8 * source_end;
+  GMappedFile * source_file;
   gboolean carry_on;
 };
 
@@ -213,6 +217,11 @@ enum _GumDarwinCpuType
   GUM_DARWIN_CPU_ARM      = 12,
   GUM_DARWIN_CPU_ARM64    = 12 | GUM_DARWIN_CPU_ARCH_ABI64,
   GUM_DARWIN_CPU_ARM64_32 = 12 | GUM_DARWIN_CPU_ARCH_ABI64_32,
+};
+
+enum _GumDarwinCpuSubtype
+{
+  GUM_DARWIN_CPU_SUBTYPE_ARM64E = 2,
 };
 
 enum _GumLoadCommandType
@@ -471,6 +480,13 @@ enum _GumBindOpcode
   GUM_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB                = 0xa0,
   GUM_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED          = 0xb0,
   GUM_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB     = 0xc0,
+  GUM_BIND_OPCODE_THREADED                             = 0xd0,
+};
+
+enum _GumBindSubopcode
+{
+  GUM_BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB = 0x00,
+  GUM_BIND_SUBOPCODE_THREADED_APPLY                            = 0x01,
 };
 
 enum _GumExportSymbolFlags
@@ -503,18 +519,17 @@ static gboolean gum_emit_section_term_pointers (
 static gboolean gum_darwin_module_ensure_image_loaded (GumDarwinModule * self,
     GError ** error);
 static gboolean gum_darwin_module_try_load_image_from_cache (
-    GumDarwinModule * self, const gchar * name, GumCpuType cpu_type,
-    GMappedFile * cache_file);
+    GumDarwinModule * self, const gchar * name, GMappedFile * cache_file);
 static gboolean gum_darwin_module_load_image_from_filesystem (
-    GumDarwinModule * self, const gchar * path, GumCpuType cpu_type,
-    GError ** error);
+    GumDarwinModule * self, const gchar * path, GError ** error);
 static gboolean gum_darwin_module_load_image_header_from_filesystem (
-    GumDarwinModule * self, const gchar * path, GumCpuType cpu_type,
-    GError ** error);
+    GumDarwinModule * self, const gchar * path, GError ** error);
 static gboolean gum_darwin_module_load_image_from_blob (GumDarwinModule * self,
     GBytes * blob, GError ** error);
 static gboolean gum_darwin_module_load_image_from_memory (
     GumDarwinModule * self, GError ** error);
+static gboolean gum_darwin_module_can_load (GumDarwinModule * self,
+    GumDarwinCpuType cpu_type, GumDarwinCpuSubtype cpu_subtype);
 static gboolean gum_darwin_module_take_image (GumDarwinModule * self,
     GumDarwinModuleImage * image, GError ** error);
 static gboolean gum_darwin_module_get_header_offset_size (
@@ -551,6 +566,11 @@ static guint64 gum_dyld_cache_compute_image_size (
 static guint64 gum_dyld_cache_offset_from_address (GumAddress address,
     const GumDyldCacheMappingInfo * mappings, gsize mapping_count);
 
+static GumCpuType gum_cpu_type_from_darwin (GumDarwinCpuType cpu_type);
+static GumPtrauthSupport gum_ptrauth_support_from_darwin (
+    GumDarwinCpuType cpu_type, GumDarwinCpuSubtype cpu_subtype);
+static guint gum_pointer_size_from_cpu_type (GumDarwinCpuType cpu_type);
+
 G_DEFINE_TYPE_EXTENDED (GumDarwinModule,
                         gum_darwin_module,
                         G_TYPE_OBJECT,
@@ -582,9 +602,10 @@ gum_darwin_module_class_init (GumDarwinModuleClass * klass)
       g_param_spec_uint ("cpu-type", "CpuType", "CPU type", 0, G_MAXUINT,
       GUM_CPU_INVALID, G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
       G_PARAM_STATIC_STRINGS));
-  g_object_class_install_property (object_class, PROP_PAGE_SIZE,
-      g_param_spec_uint ("page-size", "PageSize", "Page size", 0, G_MAXUINT,
-      0, G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+  g_object_class_install_property (object_class, PROP_PTRAUTH_SUPPORT,
+      g_param_spec_uint ("ptrauth-support", "PtrauthSupport",
+      "Pointer authentication support", 0, G_MAXUINT, GUM_PTRAUTH_INVALID,
+      G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
   g_object_class_install_property (object_class, PROP_BASE_ADDRESS,
       g_param_spec_uint64 ("base-address", "BaseAddress", "Base address", 0,
       G_MAXUINT64, 0, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
@@ -626,64 +647,15 @@ gum_darwin_module_init (GumDarwinModule * self)
 static void
 gum_darwin_module_constructed (GObject * object)
 {
+#ifdef HAVE_DARWIN
   GumDarwinModule * self = GUM_DARWIN_MODULE (object);
 
-#ifdef HAVE_DARWIN
   if (self->task != GUM_DARWIN_PORT_NULL)
   {
     self->is_local = self->task == mach_task_self ();
     self->is_kernel = self->task == gum_kernel_get_task ();
   }
-
-  if (self->cpu_type == GUM_CPU_INVALID)
-  {
-    int pid;
-
-    if (self->task == GUM_DARWIN_PORT_NULL ||
-        pid_for_task (self->task, &pid) != KERN_SUCCESS ||
-        !gum_darwin_cpu_type_from_pid (pid, &self->cpu_type))
-    {
-      self->cpu_type = GUM_NATIVE_CPU;
-    }
-  }
-#else
-  if (self->cpu_type == GUM_CPU_INVALID)
-    self->cpu_type = GUM_NATIVE_CPU;
 #endif
-
-  switch (self->cpu_type)
-  {
-    case GUM_CPU_IA32:
-    case GUM_CPU_ARM:
-      self->pointer_size = 4;
-      break;
-    case GUM_CPU_AMD64:
-    case GUM_CPU_ARM64:
-      self->pointer_size = 8;
-      break;
-    default:
-      g_assert_not_reached ();
-  }
-
-  if (self->page_size == 0)
-  {
-#ifdef HAVE_DARWIN
-    if (self->is_local)
-    {
-      self->page_size = gum_query_page_size ();
-    }
-    else
-    {
-      guint page_size = 4096;
-
-      gum_darwin_query_page_size (self->task, &page_size);
-
-      self->page_size = page_size;
-    }
-#else
-    self->page_size = 4096;
-#endif
-  }
 }
 
 static gboolean
@@ -697,12 +669,12 @@ gum_darwin_module_initable_init (GInitable * initable,
   {
     if (self->cache_file == NULL ||
         !gum_darwin_module_try_load_image_from_cache (self, self->source_path,
-        self->cpu_type, self->cache_file))
+        self->cache_file))
     {
       if (GUM_DARWIN_MODULE_HAS_HEADER_ONLY (self))
       {
         if (!gum_darwin_module_load_image_header_from_filesystem (self,
-            self->source_path, self->cpu_type, error))
+            self->source_path, error))
         {
           return FALSE;
         }
@@ -710,7 +682,7 @@ gum_darwin_module_initable_init (GInitable * initable,
       else
       {
         if (!gum_darwin_module_load_image_from_filesystem (self,
-            self->source_path, self->cpu_type, error))
+            self->source_path, error))
         {
           return FALSE;
         }
@@ -786,8 +758,8 @@ gum_darwin_module_get_property (GObject * object,
     case PROP_CPU_TYPE:
       g_value_set_uint (value, self->cpu_type);
       break;
-    case PROP_PAGE_SIZE:
-      g_value_set_uint (value, self->page_size);
+    case PROP_PTRAUTH_SUPPORT:
+      g_value_set_uint (value, self->ptrauth_support);
       break;
     case PROP_BASE_ADDRESS:
       g_value_set_uint64 (value, self->base_address);
@@ -829,8 +801,8 @@ gum_darwin_module_set_property (GObject * object,
     case PROP_CPU_TYPE:
       self->cpu_type = g_value_get_uint (value);
       break;
-    case PROP_PAGE_SIZE:
-      self->page_size = g_value_get_uint (value);
+    case PROP_PTRAUTH_SUPPORT:
+      self->ptrauth_support = g_value_get_uint (value);
       break;
     case PROP_BASE_ADDRESS:
       self->base_address = g_value_get_uint64 (value);
@@ -857,17 +829,15 @@ gum_darwin_module_set_property (GObject * object,
 
 GumDarwinModule *
 gum_darwin_module_new_from_file (const gchar * path,
-                                 GumDarwinPort task,
                                  GumCpuType cpu_type,
-                                 guint page_size,
+                                 GumPtrauthSupport ptrauth_support,
                                  GMappedFile * cache_file,
                                  GumDarwinModuleFlags flags,
                                  GError ** error)
 {
   return g_initable_new (GUM_TYPE_DARWIN_MODULE, NULL, error,
-      "task", task,
       "cpu-type", cpu_type,
-      "page-size", page_size,
+      "ptrauth-support", ptrauth_support,
       "source-path", path,
       "cache-file", cache_file,
       "flags", flags,
@@ -876,16 +846,14 @@ gum_darwin_module_new_from_file (const gchar * path,
 
 GumDarwinModule *
 gum_darwin_module_new_from_blob (GBytes * blob,
-                                 GumDarwinPort task,
                                  GumCpuType cpu_type,
-                                 guint page_size,
+                                 GumPtrauthSupport ptrauth_support,
                                  GumDarwinModuleFlags flags,
                                  GError ** error)
 {
   return g_initable_new (GUM_TYPE_DARWIN_MODULE, NULL, error,
-      "task", task,
       "cpu-type", cpu_type,
-      "page-size", page_size,
+      "ptrauth-support", ptrauth_support,
       "source-blob", blob,
       "flags", flags,
       NULL);
@@ -894,8 +862,6 @@ gum_darwin_module_new_from_blob (GBytes * blob,
 GumDarwinModule *
 gum_darwin_module_new_from_memory (const gchar * name,
                                    GumDarwinPort task,
-                                   GumCpuType cpu_type,
-                                   guint page_size,
                                    GumAddress base_address,
                                    GumDarwinModuleFlags flags,
                                    GError ** error)
@@ -903,8 +869,6 @@ gum_darwin_module_new_from_memory (const gchar * name,
   return g_initable_new (GUM_TYPE_DARWIN_MODULE, NULL, error,
       "name", name,
       "task", task,
-      "cpu-type", cpu_type,
-      "page-size", page_size,
       "base-address", base_address,
       "flags", flags,
       NULL);
@@ -1014,10 +978,18 @@ gum_darwin_module_enumerate_imports (GumDarwinModule * self,
   ctx.user_data = user_data;
 
   ctx.module = self;
+  ctx.threaded_binds = NULL;
+  ctx.source_start = NULL;
+  ctx.source_end = NULL;
+  ctx.source_file = NULL;
   ctx.carry_on = TRUE;
+
   gum_darwin_module_enumerate_binds (self, gum_emit_import, &ctx);
   if (ctx.carry_on)
     gum_darwin_module_enumerate_lazy_binds (self, gum_emit_import, &ctx);
+
+  g_clear_pointer (&ctx.source_file, g_mapped_file_unref);
+  g_clear_pointer (&ctx.threaded_binds, g_array_unref);
 }
 
 static gboolean
@@ -1025,38 +997,128 @@ gum_emit_import (const GumDarwinBindDetails * details,
                  gpointer user_data)
 {
   GumEmitImportContext * ctx = user_data;
-  GumImportDetails d;
+  GumDarwinModule * self = ctx->module;
+  const GumDarwinSegment * segment = details->segment;
+  GumAddress vm_base;
 
-  d.type = GUM_IMPORT_UNKNOWN;
-  d.name = details->symbol_name;
-  switch (details->library_ordinal)
+  vm_base = segment->vm_address + gum_darwin_module_get_slide (self);
+
+  switch (details->type)
   {
-    case GUM_BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE:
-    case GUM_BIND_SPECIAL_DYLIB_SELF:
-      return TRUE;
-    case GUM_BIND_SPECIAL_DYLIB_FLAT_LOOKUP:
+    case GUM_DARWIN_BIND_POINTER:
     {
-      d.module = NULL;
+      GumImportDetails d;
+
+      d.type = GUM_IMPORT_UNKNOWN;
+      d.name = details->symbol_name;
+      switch (details->library_ordinal)
+      {
+        case GUM_BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE:
+        case GUM_BIND_SPECIAL_DYLIB_SELF:
+          return TRUE;
+        case GUM_BIND_SPECIAL_DYLIB_FLAT_LOOKUP:
+        {
+          d.module = NULL;
+          break;
+        }
+        default:
+          d.module = gum_darwin_module_get_dependency_by_ordinal (self,
+              details->library_ordinal);
+          break;
+      }
+      d.address = 0;
+      d.slot = vm_base + details->offset;
+
+      if (ctx->threaded_binds != NULL)
+        g_array_append_val (ctx->threaded_binds, d);
+      else
+        ctx->carry_on = ctx->func (&d, ctx->user_data);
+
+      break;
+    }
+    case GUM_DARWIN_BIND_THREADED_TABLE:
+    {
+      g_clear_pointer (&ctx->threaded_binds, g_array_unref);
+      ctx->threaded_binds = g_array_sized_new (FALSE, FALSE,
+          sizeof (GumImportDetails), details->threaded_table_size);
+
+      break;
+    }
+    case GUM_DARWIN_BIND_THREADED_ITEMS:
+    {
+      GArray * threaded_binds = ctx->threaded_binds;
+      guint64 cursor;
+      GumDarwinThreadedItem item;
+
+      if (threaded_binds == NULL)
+        return TRUE;
+
+      if (ctx->source_start == NULL)
+      {
+        gchar * source_path = NULL;
+        GMappedFile * file;
+
+#ifdef HAVE_DARWIN
+        if (self->task != GUM_DARWIN_PORT_NULL)
+        {
+          GumDarwinMappingDetails mapping;
+          if (gum_darwin_query_mapped_address (self->task, vm_base, &mapping))
+            source_path = g_strdup (mapping.path);
+        }
+#endif
+        if (source_path == NULL)
+        {
+          source_path = g_strdup (self->name);
+          if (source_path == NULL)
+            return TRUE;
+        }
+        file = g_mapped_file_new (source_path, FALSE, NULL);
+        g_free (source_path);
+        if (file == NULL)
+          return TRUE;
+
+        ctx->source_start = (const guint8 *) g_mapped_file_get_contents (file);
+        ctx->source_end = ctx->source_start + g_mapped_file_get_length (file);
+        ctx->source_file = file;
+      }
+
+      cursor = details->offset;
+
+      do
+      {
+        const guint8 * raw_slot;
+
+        raw_slot = ctx->source_start + segment->file_offset + cursor;
+        if (raw_slot < ctx->source_start ||
+            raw_slot + sizeof (guint64) > ctx->source_end)
+        {
+          return FALSE;
+        }
+
+        gum_darwin_threaded_item_parse (*((const guint64 *) raw_slot), &item);
+
+        if (item.type == GUM_DARWIN_THREADED_BIND)
+        {
+          guint ordinal = item.bind_ordinal;
+          GumImportDetails * d;
+
+          if (ordinal >= threaded_binds->len)
+            return TRUE;
+          d = &g_array_index (threaded_binds, GumImportDetails, ordinal);
+          d->slot = vm_base + cursor;
+
+          ctx->carry_on = ctx->func (d, ctx->user_data);
+        }
+
+        cursor += item.delta * sizeof (guint64);
+      }
+      while (item.delta != 0 && ctx->carry_on);
+
       break;
     }
     default:
-      d.module = gum_darwin_module_get_dependency_by_ordinal (ctx->module,
-          details->library_ordinal);
-      break;
+      g_assert_not_reached ();
   }
-  d.address = 0;
-
-  if (details->segment != NULL)
-  {
-    d.slot = details->offset + details->segment->vm_address +
-        gum_darwin_module_get_slide (ctx->module);
-  }
-  else
-  {
-    d.slot = 0;
-  }
-
-  ctx->carry_on = ctx->func (&d, ctx->user_data);
 
   return ctx->carry_on;
 }
@@ -1126,7 +1188,6 @@ gum_darwin_module_enumerate_symbols (GumDarwinModule * self,
   symtab = self->symtab;
   if (symtab == NULL)
     goto beach;
-
 
   slide = gum_darwin_module_get_slide (self);
 
@@ -1212,6 +1273,9 @@ gum_darwin_module_get_nth_segment (GumDarwinModule * self,
                                    gsize index)
 {
   if (!gum_darwin_module_ensure_image_loaded (self, NULL))
+    return NULL;
+
+  if (index >= self->segments->len)
     return NULL;
 
   return &g_array_index (self->segments, GumDarwinSegment, index);
@@ -1368,6 +1432,8 @@ gum_darwin_module_enumerate_rebases (GumDarwinModule * self,
         gint segment_index = immediate;
         details.segment =
             gum_darwin_module_get_nth_segment (self, segment_index);
+        if (details.segment == NULL)
+          return;
         details.offset = gum_read_uleb128 (&p, end);
         break;
       }
@@ -1425,8 +1491,7 @@ gum_darwin_module_enumerate_rebases (GumDarwinModule * self,
         break;
       }
       default:
-        g_assert_not_reached ();
-        break;
+        return;
     }
   }
 }
@@ -1458,6 +1523,7 @@ gum_darwin_module_enumerate_binds (GumDarwinModule * self,
   details.symbol_name = NULL;
   details.symbol_flags = 0;
   details.addend = 0;
+  details.threaded_table_size = 0;
 
   while (!done && p != end)
   {
@@ -1506,6 +1572,8 @@ gum_darwin_module_enumerate_binds (GumDarwinModule * self,
         gint segment_index = immediate;
         details.segment =
             gum_darwin_module_get_nth_segment (self, segment_index);
+        if (details.segment == NULL)
+          return;
         details.offset = gum_read_uleb128 (&p, end);
         break;
       }
@@ -1542,9 +1610,43 @@ gum_darwin_module_enumerate_binds (GumDarwinModule * self,
 
         break;
       }
-      default:
-        g_assert_not_reached ();
+      case GUM_BIND_OPCODE_THREADED:
+      {
+        switch (immediate)
+        {
+          case GUM_BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB:
+          {
+            guint64 size;
+
+            size = gum_read_uleb128 (&p, end);
+            if (size > G_MAXUINT16)
+              return;
+
+            details.type = GUM_DARWIN_BIND_THREADED_TABLE;
+            details.threaded_table_size = size;
+
+            if (!func (&details, user_data))
+              return;
+
+            break;
+          }
+          case GUM_BIND_SUBOPCODE_THREADED_APPLY:
+          {
+            details.type = GUM_DARWIN_BIND_THREADED_ITEMS;
+
+            if (!func (&details, user_data))
+              return;
+
+            break;
+          }
+          default:
+            return;
+        }
+
         break;
+      }
+      default:
+        return;
     }
   }
 }
@@ -1621,6 +1723,8 @@ gum_darwin_module_enumerate_lazy_binds (GumDarwinModule * self,
         gint segment_index = immediate;
         details.segment =
             gum_darwin_module_get_nth_segment (self, segment_index);
+        if (details.segment == NULL)
+          return;
         details.offset = gum_read_uleb128 (&p, end);
         break;
       }
@@ -1636,8 +1740,7 @@ gum_darwin_module_enumerate_lazy_binds (GumDarwinModule * self,
       case GUM_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
       case GUM_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
       default:
-        g_assert_not_reached ();
-        break;
+        return;
     }
   }
 }
@@ -1647,6 +1750,12 @@ gum_darwin_module_enumerate_init_pointers (GumDarwinModule * self,
                                            GumFoundDarwinInitPointersFunc func,
                                            gpointer user_data)
 {
+  if (GUM_DARWIN_MODULE_HAS_HEADER_ONLY (self) ||
+      !gum_darwin_module_ensure_image_loaded (self, NULL))
+  {
+    return;
+  }
+
   GumEmitInitPointersContext ctx;
   ctx.func = func;
   ctx.user_data = user_data;
@@ -1660,6 +1769,12 @@ gum_darwin_module_enumerate_term_pointers (GumDarwinModule * self,
                                            GumFoundDarwinTermPointersFunc func,
                                            gpointer user_data)
 {
+  if (GUM_DARWIN_MODULE_HAS_HEADER_ONLY (self) ||
+      !gum_darwin_module_ensure_image_loaded (self, NULL))
+  {
+    return;
+  }
+
   GumEmitTermPointersContext ctx;
   ctx.func = func;
   ctx.user_data = user_data;
@@ -1738,6 +1853,46 @@ gum_darwin_module_get_dependency_by_ordinal (GumDarwinModule * self,
   return g_ptr_array_index (self->dependencies, i);
 }
 
+void
+gum_darwin_threaded_item_parse (guint64 value,
+                                GumDarwinThreadedItem * result)
+{
+  result->is_authenticated      = (value >> 63) & 1;
+  result->type                  = (value >> 62) & 1;
+  result->delta                 = (value >> 51) & GUM_INT11_MASK;
+  result->key                   = (value >> 49) & GUM_INT2_MASK;
+  result->has_address_diversity = (value >> 48) & 1;
+  result->diversity             = (value >> 32) & GUM_INT16_MASK;
+
+  if (result->type == GUM_DARWIN_THREADED_BIND)
+  {
+    result->bind_ordinal = value & GUM_INT16_MASK;
+  }
+  else if (result->type == GUM_DARWIN_THREADED_REBASE)
+  {
+    if (result->is_authenticated)
+    {
+      result->rebase_address = value & GUM_INT32_MASK;
+    }
+    else
+    {
+      guint64 top_8_bits, bottom_43_bits, sign_bits;
+      gboolean sign_bit_set;
+
+      top_8_bits = (value << 13) & G_GUINT64_CONSTANT (0xff00000000000000);
+      bottom_43_bits = value     & G_GUINT64_CONSTANT (0x000007ffffffffff);
+
+      sign_bit_set = (value >> 42) & 1;
+      if (sign_bit_set)
+        sign_bits = G_GUINT64_CONSTANT (0x00fff80000000000);
+      else
+        sign_bits = 0;
+
+      result->rebase_address = top_8_bits | sign_bits | bottom_43_bits;
+    }
+  }
+}
+
 static gboolean
 gum_darwin_module_ensure_image_loaded (GumDarwinModule * self,
                                        GError ** error)
@@ -1751,7 +1906,6 @@ gum_darwin_module_ensure_image_loaded (GumDarwinModule * self,
 static gboolean
 gum_darwin_module_try_load_image_from_cache (GumDarwinModule * self,
                                              const gchar * name,
-                                             GumCpuType cpu_type,
                                              GMappedFile * cache_file)
 {
   guint8 * cache;
@@ -1813,7 +1967,6 @@ gum_darwin_module_try_load_image_from_cache (GumDarwinModule * self,
 static gboolean
 gum_darwin_module_load_image_from_filesystem (GumDarwinModule * self,
                                               const gchar * path,
-                                              GumCpuType cpu_type,
                                               GError ** error)
 {
   gboolean success;
@@ -1849,7 +2002,6 @@ gum_darwin_module_load_image_from_filesystem (GumDarwinModule * self,
 static gboolean
 gum_darwin_module_load_image_header_from_filesystem (GumDarwinModule * self,
                                                      const gchar * path,
-                                                     GumCpuType cpu_type,
                                                      GError ** error)
 {
   gboolean success;
@@ -1919,14 +2071,13 @@ gum_darwin_module_get_header_offset_size (GumDarwinModule * self,
                                           GError ** error)
 {
   GumFatHeader * fat_header;
-  GumMachHeader32 * header_32 = NULL;
-  GumMachHeader64 * header_64 = NULL;
-  gboolean found = FALSE;
   gpointer data_end;
+  gboolean found;
 
-  data_end = (guint8 *) data + data_size;
   fat_header = data;
+  data_end = (guint8 *) data + data_size;
 
+  found = FALSE;
   switch (fat_header->magic)
   {
     case GUM_FAT_CIGAM_32:
@@ -1936,67 +2087,71 @@ gum_darwin_module_get_header_offset_size (GumDarwinModule * self,
       count = GUINT32_FROM_BE (fat_header->nfat_arch);
       for (i = 0; i != count && !found; i++)
       {
-        guint32 offset, cpu_type;
+        GumFatArch32 * fat_arch;
+        guint32 offset;
+        GumDarwinCpuType cpu_type;
+        GumDarwinCpuSubtype cpu_subtype;
 
-        GumFatArch32 * fat_arch = ((GumFatArch32 *) (fat_header + 1)) + i;
+        fat_arch = ((GumFatArch32 *) (fat_header + 1)) + i;
         if ((gpointer) (fat_arch + 1) > data_end)
           goto invalid_blob;
 
         offset = GUINT32_FROM_BE (fat_arch->offset);
         cpu_type = GUINT32_FROM_BE (fat_arch->cputype);
+        cpu_subtype = GUINT32_FROM_BE (fat_arch->cpusubtype);
 
-        *out_offset = offset;
-        switch (cpu_type)
+        found = gum_darwin_module_can_load (self, cpu_type, cpu_subtype);
+        if (found)
         {
-          case GUM_DARWIN_CPU_ARM:
-          case GUM_DARWIN_CPU_X86:
-            *out_size = sizeof (GumMachHeader32);
-            found = self->cpu_type == GUM_CPU_ARM ||
-                self->cpu_type == GUM_CPU_IA32;
-            break;
-          case GUM_DARWIN_CPU_ARM64:
-          case GUM_DARWIN_CPU_X86_64:
-            *out_size = sizeof (GumMachHeader64);
-            found = self->cpu_type == GUM_CPU_ARM64 ||
-                self->cpu_type == GUM_CPU_AMD64;
-            break;
-          default:
-            goto invalid_blob;
+          *out_offset = offset;
+          *out_size = (gum_pointer_size_from_cpu_type (cpu_type) == 8)
+              ? sizeof (GumMachHeader64)
+              : sizeof (GumMachHeader32);
         }
       }
 
       break;
     }
     case GUM_MH_MAGIC_32:
-      header_32 = data;
-      if ((gpointer) (header_32 + 1) > data_end)
+    {
+      GumMachHeader32 * header = data;
+
+      if ((gpointer) (header + 1) > data_end)
         goto invalid_blob;
 
-      *out_offset = 0;
-      *out_size = sizeof (GumMachHeader32) + header_32->sizeofcmds;
-
-      found = self->cpu_type == GUM_CPU_ARM ||
-          self->cpu_type == GUM_CPU_IA32;
+      found = gum_darwin_module_can_load (self, header->cputype,
+          header->cpusubtype);
+      if (found)
+      {
+        *out_offset = 0;
+        *out_size = sizeof (GumMachHeader32) + header->sizeofcmds;
+      }
 
       break;
+    }
     case GUM_MH_MAGIC_64:
-      header_64 = data;
-      if ((gpointer) (header_64 + 1) > data_end)
+    {
+      GumMachHeader64 * header = data;
+
+      if ((gpointer) (header + 1) > data_end)
         goto invalid_blob;
 
-      *out_offset = 0;
-      *out_size = sizeof (GumMachHeader64) + header_64->sizeofcmds;
-
-      found = self->cpu_type == GUM_CPU_ARM64 ||
-          self->cpu_type == GUM_CPU_AMD64;
+      found = gum_darwin_module_can_load (self, header->cputype,
+          header->cpusubtype);
+      if (found)
+      {
+        *out_offset = 0;
+        *out_size = sizeof (GumMachHeader64) + header->sizeofcmds;
+      }
 
       break;
+    }
     default:
       goto invalid_blob;
   }
 
   if (!found)
-    goto invalid_blob;
+    goto incompatible_image;
 
   return TRUE;
 
@@ -2004,6 +2159,12 @@ invalid_blob:
   {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
         "Invalid Mach-O image");
+    return FALSE;
+  }
+incompatible_image:
+  {
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+        "Incompatible Mach-O image");
     return FALSE;
   }
 }
@@ -2014,83 +2175,103 @@ gum_darwin_module_load_image_from_blob (GumDarwinModule * self,
                                         GError ** error)
 {
   GumDarwinModuleImage * image;
-  gpointer blob_data;
+  guint8 * blob_start, * blob_end;
   gsize blob_size;
-  GumFatHeader * fat_header;
-  GumMachHeader32 * header_32 = NULL;
-  GumMachHeader64 * header_64 = NULL;
-  gsize size_32 = 0;
-  gsize size_64 = 0;
+  gpointer data;
+  gsize size;
+  guint32 magic;
 
   image = gum_darwin_module_image_new ();
   image->bytes = g_bytes_ref (blob);
 
-  blob_data = (gpointer) g_bytes_get_data (blob, &blob_size);
+  blob_start = (guint8 *) g_bytes_get_data (blob, &blob_size);
+  blob_end = blob_start + blob_size;
 
-  fat_header = blob_data;
-  switch (fat_header->magic)
+  data = blob_start;
+  size = blob_size;
+
+  if (blob_size < 4)
+    goto invalid_blob;
+  magic = *((guint32 *) data);
+
+  if (magic == GUM_FAT_CIGAM_32)
   {
-    case GUM_FAT_CIGAM_32:
-    {
-      guint32 count, i;
+    GumFatHeader * fat_header;
+    guint32 count, i;
+    gboolean found;
 
-      count = GUINT32_FROM_BE (fat_header->nfat_arch);
-      for (i = 0; i != count; i++)
+    fat_header = (GumFatHeader *) blob_start;
+
+    count = GUINT32_FROM_BE (fat_header->nfat_arch);
+    found = FALSE;
+    for (i = 0; i != count && !found; i++)
+    {
+      GumFatArch32 * fat_arch;
+      GumDarwinCpuType cpu_type;
+      GumDarwinCpuSubtype cpu_subtype;
+
+      fat_arch = ((GumFatArch32 *) (fat_header + 1)) + i;
+      if ((guint8 *) (fat_arch + 1) > blob_end)
+        goto invalid_blob;
+
+      cpu_type = GUINT32_FROM_BE (fat_arch->cputype);
+      cpu_subtype = GUINT32_FROM_BE (fat_arch->cpusubtype);
+
+      found = gum_darwin_module_can_load (self, cpu_type, cpu_subtype);
+      if (found)
       {
-        GumFatArch32 * fat_arch = ((GumFatArch32 *) (fat_header + 1)) + i;
-        gpointer mach_header = (guint8 *) blob_data +
-            GUINT32_FROM_BE (fat_arch->offset);
-        switch (((GumMachHeader32 *) mach_header)->magic)
-        {
-          case GUM_MH_MAGIC_32:
-            header_32 = mach_header;
-            size_32 = GUINT32_FROM_BE (fat_arch->size);
-            break;
-          case GUM_MH_MAGIC_64:
-            header_64 = mach_header;
-            size_64 = GUINT32_FROM_BE (fat_arch->size);
-            break;
-          default:
-            goto invalid_blob;
-        }
+        data = blob_start + GUINT32_FROM_BE (fat_arch->offset);
+        size = GUINT32_FROM_BE (fat_arch->size);
+      }
+    }
+
+    if (!found)
+      goto incompatible_image;
+
+    if ((guint8 *) data + 4 > blob_end)
+      goto invalid_blob;
+    magic = *((guint32 *) data);
+  }
+
+  switch (magic)
+  {
+    case GUM_MH_MAGIC_32:
+    {
+      GumMachHeader32 * header = data;
+
+      if ((guint8 *) (header + 1) > blob_end)
+        goto invalid_blob;
+
+      if (!gum_darwin_module_can_load (self, header->cputype,
+          header->cpusubtype))
+      {
+        goto incompatible_image;
       }
 
       break;
     }
-    case GUM_MH_MAGIC_32:
-      header_32 = blob_data;
-      size_32 = blob_size;
-      break;
     case GUM_MH_MAGIC_64:
-      header_64 = blob_data;
-      size_64 = blob_size;
+    {
+      GumMachHeader64 * header = data;
+
+      if ((guint8 *) (header + 1) > blob_end)
+        goto invalid_blob;
+
+      if (!gum_darwin_module_can_load (self, header->cputype,
+          header->cpusubtype))
+      {
+        goto incompatible_image;
+      }
+
       break;
+    }
     default:
       goto invalid_blob;
   }
 
-  switch (self->cpu_type)
-  {
-    case GUM_CPU_IA32:
-    case GUM_CPU_ARM:
-      if (header_32 == NULL)
-        goto invalid_blob;
-      image->data = header_32;
-      image->size = size_32;
-      image->linkedit = header_32;
-      break;
-    case GUM_CPU_AMD64:
-    case GUM_CPU_ARM64:
-      if (header_64 == NULL)
-        goto invalid_blob;
-      image->data = header_64;
-      image->size = size_64;
-      image->linkedit = header_64;
-      break;
-    default:
-      g_assert_not_reached ();
-      break;
-  }
+  image->data = data;
+  image->size = size;
+  image->linkedit = data;
 
   return gum_darwin_module_take_image (self, image, error);
 
@@ -2100,6 +2281,14 @@ invalid_blob:
 
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
         "Invalid Mach-O image");
+    return FALSE;
+  }
+incompatible_image:
+  {
+    gum_darwin_module_image_free (image);
+
+    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+        "Incompatible Mach-O image");
     return FALSE;
   }
 }
@@ -2117,14 +2306,14 @@ gum_darwin_module_load_image_from_memory (GumDarwinModule * self,
   if (self->is_local)
   {
     data = GSIZE_TO_POINTER (self->base_address);
-    data_size = MAX_METADATA_SIZE;
+    data_size = GUM_MAX_MACHO_METADATA_SIZE;
     malloc_data = NULL;
   }
   else
   {
     data_size = 0;
     data = gum_darwin_module_read_from_task (self, self->base_address,
-        MAX_METADATA_SIZE, &data_size);
+        GUM_MAX_MACHO_METADATA_SIZE, &data_size);
     if (data == NULL)
       return FALSE;
     malloc_data = data;
@@ -2141,6 +2330,43 @@ gum_darwin_module_load_image_from_memory (GumDarwinModule * self,
 }
 
 static gboolean
+gum_darwin_module_can_load (GumDarwinModule * self,
+                            GumDarwinCpuType cpu_type,
+                            GumDarwinCpuSubtype cpu_subtype)
+{
+  GumCpuType canonical_cpu_type;
+  gboolean allow_any_cpu, allow_any_ptrauth;
+
+  canonical_cpu_type = gum_cpu_type_from_darwin (cpu_type);
+
+  allow_any_cpu = self->cpu_type == GUM_CPU_INVALID;
+  if (allow_any_cpu)
+  {
+    gboolean is_supported = canonical_cpu_type != GUM_CPU_INVALID;
+    if (!is_supported)
+      return FALSE;
+  }
+  else
+  {
+    gboolean matches_selected_cpu = canonical_cpu_type == self->cpu_type;
+    if (!matches_selected_cpu)
+      return FALSE;
+  }
+
+  allow_any_ptrauth = self->ptrauth_support == GUM_PTRAUTH_INVALID;
+  if (!allow_any_ptrauth)
+  {
+    gboolean matches_selected_ptrauth =
+        gum_ptrauth_support_from_darwin (cpu_type, cpu_subtype)
+        == self->ptrauth_support;
+    if (!matches_selected_ptrauth)
+      return FALSE;
+  }
+
+  return TRUE;
+}
+
+static gboolean
 gum_darwin_module_take_image (GumDarwinModule * self,
                               GumDarwinModuleImage * image,
                               GError ** error)
@@ -2154,8 +2380,18 @@ gum_darwin_module_take_image (GumDarwinModule * self,
   self->image = image;
 
   header = (GumMachHeader32 *) image->data;
-  if (header->filetype == GUM_MH_EXECUTE)
-    self->name = g_strdup ("Executable");
+
+  if (self->cpu_type == GUM_CPU_INVALID)
+    self->cpu_type = gum_cpu_type_from_darwin (header->cputype);
+
+  if (self->ptrauth_support == GUM_PTRAUTH_INVALID)
+  {
+    self->ptrauth_support =
+        gum_ptrauth_support_from_darwin (header->cputype, header->cpusubtype);
+  }
+
+  self->pointer_size = gum_pointer_size_from_cpu_type (header->cputype);
+
   if (header->magic == GUM_MH_MAGIC_32)
     command = (GumMachHeader32 *) image->data + 1;
   else
@@ -2345,7 +2581,7 @@ gum_darwin_module_take_image (GumDarwinModule * self,
         &self->exports_malloc_data);
   }
 
-  success = self->name != NULL;
+  success = self->segments->len != 0;
 
 beach:
   if (!success)
@@ -2599,7 +2835,7 @@ gum_exports_trie_find (const guint8 * exports,
       }
       else
       {
-        gum_skip_uleb128 (&p);
+        gum_skip_uleb128 (&p, exports_end);
       }
     }
 
@@ -2801,4 +3037,52 @@ gum_darwin_module_flags_get_type (void)
   }
 
   return (GType) gonce_value;
+}
+
+static GumCpuType
+gum_cpu_type_from_darwin (GumDarwinCpuType cpu_type)
+{
+  switch (cpu_type)
+  {
+    case GUM_DARWIN_CPU_X86:
+      return GUM_CPU_IA32;
+    case GUM_DARWIN_CPU_X86_64:
+      return GUM_CPU_AMD64;
+    case GUM_DARWIN_CPU_ARM:
+      return GUM_CPU_ARM;
+    case GUM_DARWIN_CPU_ARM64:
+      return GUM_CPU_ARM64;
+    default:
+      return GUM_CPU_INVALID;
+  }
+}
+
+static GumPtrauthSupport
+gum_ptrauth_support_from_darwin (GumDarwinCpuType cpu_type,
+                                 GumDarwinCpuSubtype cpu_subtype)
+{
+  if (cpu_type == GUM_DARWIN_CPU_ARM64)
+  {
+    return (cpu_subtype == GUM_DARWIN_CPU_SUBTYPE_ARM64E)
+        ? GUM_PTRAUTH_SUPPORTED
+        : GUM_PTRAUTH_UNSUPPORTED;
+  }
+
+  return GUM_PTRAUTH_UNSUPPORTED;
+}
+
+static guint
+gum_pointer_size_from_cpu_type (GumDarwinCpuType cpu_type)
+{
+  switch (cpu_type)
+  {
+    case GUM_DARWIN_CPU_X86:
+    case GUM_DARWIN_CPU_ARM:
+      return 4;
+    case GUM_DARWIN_CPU_X86_64:
+    case GUM_DARWIN_CPU_ARM64:
+      return 8;
+    default:
+      return 0;
+  }
 }

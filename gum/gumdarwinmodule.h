@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -30,6 +30,7 @@ typedef struct _GumDarwinModuleImageSegment GumDarwinModuleImageSegment;
 typedef struct _GumDarwinSectionDetails GumDarwinSectionDetails;
 typedef struct _GumDarwinRebaseDetails GumDarwinRebaseDetails;
 typedef struct _GumDarwinBindDetails GumDarwinBindDetails;
+typedef struct _GumDarwinThreadedItem GumDarwinThreadedItem;
 typedef struct _GumDarwinInitPointersDetails GumDarwinInitPointersDetails;
 typedef struct _GumDarwinTermPointersDetails GumDarwinTermPointersDetails;
 typedef struct _GumDarwinSegment GumDarwinSegment;
@@ -38,6 +39,7 @@ typedef struct _GumDarwinSymbolDetails GumDarwinSymbolDetails;
 
 typedef guint8 GumDarwinRebaseType;
 typedef guint8 GumDarwinBindType;
+typedef guint8 GumDarwinThreadedItemType;
 typedef gint GumDarwinBindOrdinal;
 typedef guint8 GumDarwinBindSymbolFlags;
 typedef guint8 GumDarwinExportSymbolKind;
@@ -79,8 +81,8 @@ struct _GumDarwinModule
   gboolean is_local;
   gboolean is_kernel;
   GumCpuType cpu_type;
+  GumPtrauthSupport ptrauth_support;
   gsize pointer_size;
-  gsize page_size;
   GumAddress base_address;
   gchar * source_path;
   GBytes * source_blob;
@@ -175,6 +177,21 @@ struct _GumDarwinBindDetails
   const gchar * symbol_name;
   GumDarwinBindSymbolFlags symbol_flags;
   gint64 addend;
+  guint16 threaded_table_size;
+};
+
+struct _GumDarwinThreadedItem
+{
+  gboolean is_authenticated;
+  GumDarwinThreadedItemType type;
+  guint16 delta;
+  guint8 key;
+  gboolean has_address_diversity;
+  guint16 diversity;
+
+  guint16 bind_ordinal;
+
+  GumAddress rebase_address;
 };
 
 struct _GumDarwinInitPointersDetails
@@ -248,6 +265,14 @@ enum _GumDarwinBindType
   GUM_DARWIN_BIND_POINTER = 1,
   GUM_DARWIN_BIND_TEXT_ABSOLUTE32,
   GUM_DARWIN_BIND_TEXT_PCREL32,
+  GUM_DARWIN_BIND_THREADED_TABLE,
+  GUM_DARWIN_BIND_THREADED_ITEMS,
+};
+
+enum _GumDarwinThreadedItemType
+{
+  GUM_DARWIN_THREADED_REBASE,
+  GUM_DARWIN_THREADED_BIND
 };
 
 enum _GumDarwinBindOrdinal
@@ -279,14 +304,14 @@ enum _GumDarwinExportSymbolFlags
 };
 
 GUM_API GumDarwinModule * gum_darwin_module_new_from_file (const gchar * path,
-    GumDarwinPort task, GumCpuType cpu_type, guint page_size,
+    GumCpuType cpu_type, GumPtrauthSupport ptrauth_support,
     GMappedFile * cache_file, GumDarwinModuleFlags flags, GError ** error);
 GUM_API GumDarwinModule * gum_darwin_module_new_from_blob (GBytes * blob,
-    GumDarwinPort task, GumCpuType cpu_type, guint page_size,
+    GumCpuType cpu_type, GumPtrauthSupport ptrauth_support,
     GumDarwinModuleFlags flags, GError ** error);
 GUM_API GumDarwinModule * gum_darwin_module_new_from_memory (const gchar * name,
-    GumDarwinPort task, GumCpuType cpu_type, guint page_size,
-    GumAddress base_address, GumDarwinModuleFlags flags, GError ** error);
+    GumDarwinPort task, GumAddress base_address, GumDarwinModuleFlags flags,
+    GError ** error);
 
 GUM_API gboolean gum_darwin_module_resolve_export (GumDarwinModule * self,
     const gchar * symbol, GumDarwinExportDetails * details);
@@ -321,6 +346,9 @@ GUM_API void gum_darwin_module_enumerate_dependencies (GumDarwinModule * self,
     GumFoundDarwinDependencyFunc func, gpointer user_data);
 GUM_API const gchar * gum_darwin_module_get_dependency_by_ordinal (
     GumDarwinModule * self, gint ordinal);
+
+GUM_API void gum_darwin_threaded_item_parse (guint64 value,
+    GumDarwinThreadedItem * result);
 
 GUM_API GumDarwinModuleImage * gum_darwin_module_image_new (void);
 GUM_API GumDarwinModuleImage * gum_darwin_module_image_dup (

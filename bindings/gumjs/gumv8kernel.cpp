@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -172,7 +172,7 @@ static const GumV8Function gumjs_kernel_functions[] =
 void
 _gum_v8_kernel_init (GumV8Kernel * self,
                      GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                     Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -497,13 +497,13 @@ gum_v8_kernel_read (GumMemoryValueType type,
         result = Number::New (isolate, *((gdouble *) data));
         break;
       case GUM_MEMORY_VALUE_BYTE_ARRAY:
-        result = ArrayBuffer::New (isolate, data, n_bytes_read,
-            ArrayBufferCreationMode::kInternalized);
+        result = _gum_v8_array_buffer_new_take (isolate,
+            g_steal_pointer (&data), n_bytes_read);
         break;
       case GUM_MEMORY_VALUE_C_STRING:
       {
         gchar * str = g_utf8_make_valid ((gchar *) data, length);
-        result = String::NewFromUtf8 (isolate, str, String::kNormalString);
+        result = String::NewFromUtf8 (isolate, str).ToLocalChecked ();
         g_free (str);
 
         break;
@@ -520,7 +520,7 @@ gum_v8_kernel_read (GumMemoryValueType type,
         }
 
         result = String::NewFromUtf8 (isolate, (gchar *) data,
-            String::kNormalString, length);
+            NewStringType::kNormal, length).ToLocalChecked ();
 
         break;
       }
@@ -539,7 +539,7 @@ gum_v8_kernel_read (GumMemoryValueType type,
         if (size != 0)
         {
           result = String::NewFromUtf8 (isolate, str_utf8,
-              String::kNormalString, size);
+              NewStringType::kNormal, size).ToLocalChecked ();
         }
         else
         {
@@ -551,6 +551,8 @@ gum_v8_kernel_read (GumMemoryValueType type,
         break;
       }
     }
+
+    g_free (data);
   }
   else
   {
@@ -817,7 +819,7 @@ gum_kernel_scan_context_emit_match (GumAddress address,
 
   auto on_match = Local<Function>::New (isolate, *self->on_match);
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = {
+  Local<Value> argv[] = {
     _gum_v8_uint64_new (address, self->core),
     Integer::NewFromUnsigned (isolate, size)
   };

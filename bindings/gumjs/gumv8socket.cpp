@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -96,9 +96,9 @@ GUMJS_DECLARE_FUNCTION (gumjs_socket_connection_set_no_delay)
 static void gum_v8_set_no_delay_operation_perform (
     GumV8SetNoDelayOperation * self);
 
-static gboolean gum_v8_socket_family_get (Handle<Value> value,
+static gboolean gum_v8_socket_family_get (Local<Value> value,
     GSocketFamily * family, GumV8Core * core);
-static gboolean gum_v8_unix_socket_address_type_get (Handle<Value> value,
+static gboolean gum_v8_unix_socket_address_type_get (Local<Value> value,
     GUnixSocketAddressType * type, GumV8Core * core);
 
 static Local<Value> gum_v8_socket_address_to_value (
@@ -133,7 +133,7 @@ static const GumV8Function gumjs_socket_connection_functions[] =
 void
 _gum_v8_socket_init (GumV8Socket * self,
                      GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                     Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -324,12 +324,12 @@ gum_v8_listen_operation_perform (GumV8ListenOperation * self)
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
       listener_value = null_value;
     }
 
-    Handle<Value> argv[] = { error_value, listener_value };
+    Local<Value> argv[] = { error_value, listener_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto result = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -455,12 +455,12 @@ gum_v8_connect_operation_finish (GSocketClient * client,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
       connection_value = null_value;
     }
 
-    Handle<Value> argv[] = { error_value, connection_value };
+    Local<Value> argv[] = { error_value, connection_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -534,9 +534,14 @@ GUMJS_DEFINE_FUNCTION (gumjs_socket_get_type)
   }
 
   if (res != NULL)
-    info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, res));
+  {
+    info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, res)
+        .ToLocalChecked ());
+  }
   else
+  {
     info.GetReturnValue ().SetNull ();
+  }
 }
 
 GUMJS_DEFINE_FUNCTION (gumjs_socket_get_local_address)
@@ -577,7 +582,7 @@ gum_v8_socket_listener_new (GSocketListener * listener,
   auto context = isolate->GetCurrentContext ();
 
   auto ctor (Local<FunctionTemplate>::New (isolate, *module->listener));
-  Handle<Value> argv[] = { External::New (isolate, listener) };
+  Local<Value> argv[] = { External::New (isolate, listener) };
   return ctor->GetFunction (context).ToLocalChecked ()
       ->NewInstance (context, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
 }
@@ -672,12 +677,12 @@ gum_v8_accept_operation_finish (GSocketListener * listener,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
       connection_value = null_value;
     }
 
-    Handle<Value> argv[] = { error_value, connection_value };
+    Local<Value> argv[] = { error_value, connection_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -696,7 +701,7 @@ gum_v8_socket_connection_new (GSocketConnection * connection,
 
   Local<FunctionTemplate> ctor (
       Local<FunctionTemplate>::New (isolate, *module->connection));
-  Handle<Value> argv[] = { External::New (isolate, connection) };
+  Local<Value> argv[] = { External::New (isolate, connection) };
   return ctor->GetFunction (context).ToLocalChecked ()
       ->NewInstance (context, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
 }
@@ -711,7 +716,7 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_socket_connection_construct)
 
   auto base_ctor (Local<FunctionTemplate>::New (isolate,
       *core->script->stream.io_stream));
-  Handle<Value> argv[] = { External::New (isolate, connection) };
+  Local<Value> argv[] = { External::New (isolate, connection) };
   base_ctor->GetFunction (context).ToLocalChecked ()
       ->Call (context, wrapper, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
 }
@@ -754,11 +759,11 @@ gum_v8_set_no_delay_operation_perform (GumV8SetNoDelayOperation * self)
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
     }
 
-    Handle<Value> argv[] = { error_value, success_value };
+    Local<Value> argv[] = { error_value, success_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto result = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -769,7 +774,7 @@ gum_v8_set_no_delay_operation_perform (GumV8SetNoDelayOperation * self)
 }
 
 static gboolean
-gum_v8_socket_family_get (Handle<Value> value,
+gum_v8_socket_family_get (Local<Value> value,
                           GSocketFamily * family,
                           GumV8Core * core)
 {
@@ -812,7 +817,7 @@ gum_v8_socket_family_get (Handle<Value> value,
 }
 
 static gboolean
-gum_v8_unix_socket_address_type_get (Handle<Value> value,
+gum_v8_unix_socket_address_type_get (Local<Value> value,
                                      GUnixSocketAddressType * type,
                                      GumV8Core * core)
 {

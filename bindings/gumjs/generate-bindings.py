@@ -310,6 +310,8 @@ def generate_duk_wrapper_code(component, api):
                 lines.append("  duk_push_uint (ctx, result);")
             elif method.return_type == "gpointer":
                 lines.append("  _gum_duk_push_native_pointer (ctx, result, args->core);")
+            elif method.return_type == "GumAddress":
+                lines.append("  _gum_duk_push_native_pointer (ctx, GSIZE_TO_POINTER (result), args->core);")
             elif method.return_type == "cs_insn *":
                 if component.flavor == "x86":
                     target = "GSIZE_TO_POINTER (result->address)"
@@ -1293,6 +1295,8 @@ def generate_v8_wrapper_code(component, api):
                 lines.append("  info.GetReturnValue ().Set ((uint32_t) result);")
             elif method.return_type == "gpointer":
                 lines.append("  info.GetReturnValue ().Set (_gum_v8_native_pointer_new (result, core));")
+            elif method.return_type == "GumAddress":
+                lines.append("  info.GetReturnValue ().Set (_gum_v8_native_pointer_new (GSIZE_TO_POINTER (result), core));")
             elif method.return_type == "cs_insn *":
                 if component.flavor == "x86":
                     target = "GSIZE_TO_POINTER (result->address)"
@@ -1431,7 +1435,7 @@ struct {wrapper_struct_name}
   {module_struct_name} * module;
 }};
 
-G_GNUC_INTERNAL gboolean _gum_v8_{flavor}_writer_get (v8::Handle<v8::Value> value,
+G_GNUC_INTERNAL gboolean _gum_v8_{flavor}_writer_get (v8::Local<v8::Value> value,
     {impl_struct_name} ** writer, {module_struct_name} * module);
 
 G_GNUC_INTERNAL {wrapper_struct_name} * _{wrapper_function_prefix}_new_persistent ({module_struct_name} * module);
@@ -1485,7 +1489,7 @@ static gboolean {wrapper_function_prefix}_check ({wrapper_struct_name} * self,
 
 gboolean
 _gum_v8_{flavor}_writer_get (
-    v8::Handle<v8::Value> value,
+    v8::Local<v8::Value> value,
     {impl_struct_name} ** writer,
     {module_struct_name} * module)
 {{
@@ -1520,7 +1524,7 @@ _{wrapper_function_prefix}_new_persistent (GumV8CodeWriter * module)
       *module->{flavor}_writer);
 
   auto writer_value = External::New (isolate, writer);
-  Handle<Value> argv[] = {{ writer_value }};
+  Local<Value> argv[] = {{ writer_value }};
 
   auto object = writer_class->GetFunction (context).ToLocalChecked ()
       ->NewInstance (context, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
@@ -1706,7 +1710,15 @@ static gboolean
 
   if (!options.IsEmpty ())
   {{
-    auto pc_value = options->Get (_gum_v8_string_new_ascii (isolate, "pc"));
+    auto context = isolate->GetCurrentContext ();
+
+    Local<Value> pc_value;
+    if (!options->Get (context, _gum_v8_string_new_ascii (isolate, "pc"))
+        .ToLocal (&pc_value))
+    {{
+      return FALSE;
+    }}
+
     if (!pc_value->IsUndefined ())
     {{
       gpointer raw_value;
@@ -1815,7 +1827,7 @@ static gboolean {gumjs_function_prefix}_parse_constructor_args (const GumV8Args 
 
 gboolean
 _gum_v8_{flavor}_relocator_get (
-    v8::Handle<v8::Value> value,
+    v8::Local<v8::Value> value,
     {impl_struct_name} ** relocator,
     {module_struct_name} * module)
 {{
@@ -1850,7 +1862,7 @@ _{wrapper_function_prefix}_new_persistent (GumV8CodeRelocator * module)
       *module->{flavor}_relocator);
 
   auto relocator_value = External::New (isolate, relocator);
-  Handle<Value> argv[] = {{ relocator_value }};
+  Local<Value> argv[] = {{ relocator_value }};
 
   auto object = relocator_class->GetFunction (context).ToLocalChecked ()
       ->NewInstance (context, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
@@ -2864,7 +2876,7 @@ class Method(object):
             self.return_type_ts = "boolean"
         elif return_type == "guint":
             self.return_type_ts = "number"
-        elif return_type == "gpointer":
+        elif return_type in ("gpointer", "GumAddress"):
             self.return_type_ts = "NativePointer"
         elif return_type == "cs_insn *":
             self.return_type_ts = "Instruction | null"

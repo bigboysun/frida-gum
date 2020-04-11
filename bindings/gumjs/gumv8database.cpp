@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2017-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -95,8 +95,8 @@ static const GumV8Function gumjs_statement_functions[] =
 
 void
 _gum_v8_database_init (GumV8Database * self,
-                     GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                       GumV8Core * core,
+                       Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -557,13 +557,15 @@ static Local<Array>
 gum_parse_row (Isolate * isolate,
                sqlite3_stmt * statement)
 {
+  auto context = isolate->GetCurrentContext ();
+
   auto num_columns = sqlite3_column_count (statement);
   auto row = Array::New (isolate, num_columns);
 
   for (gint index = 0; index != num_columns; index++)
   {
     auto column = gum_parse_column (isolate, statement, index);
-    row->Set (index, column);
+    row->Set (context, index, column).Check ();
   }
 
   return row;
@@ -588,8 +590,7 @@ gum_parse_column (Isolate * isolate,
     {
       auto size = sqlite3_column_bytes (statement, index);
       auto data = g_memdup (sqlite3_column_blob (statement, index), size);
-      return ArrayBuffer::New (isolate, data, size,
-          ArrayBufferCreationMode::kInternalized);
+      return _gum_v8_array_buffer_new_take (isolate, data, size);
     }
     case SQLITE_NULL:
       return Null (isolate);

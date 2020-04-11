@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -89,7 +89,7 @@ GUMJS_DECLARE_FUNCTION (gumjs_module_map_find_path)
 GUMJS_DECLARE_FUNCTION (gumjs_module_map_update)
 GUMJS_DECLARE_FUNCTION (gumjs_module_map_copy_values)
 
-static GumV8ModuleMap * gum_v8_module_map_new (Handle<Object> wrapper,
+static GumV8ModuleMap * gum_v8_module_map_new (Local<Object> wrapper,
     GumModuleMap * handle, GumV8Module * module);
 static void gum_v8_module_map_free (GumV8ModuleMap * self);
 static void gum_v8_module_map_on_weak_notify (
@@ -135,7 +135,7 @@ static const GumV8Function gumjs_module_map_functions[] =
 void
 _gum_v8_module_init (GumV8Module * self,
                      GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                     Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -643,7 +643,8 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_find_name, GumV8ModuleMap)
     return;
   }
 
-  info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, details->name));
+  info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, details->name)
+      .ToLocalChecked ());
 }
 
 GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_find_path, GumV8ModuleMap)
@@ -659,7 +660,8 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_find_path, GumV8ModuleMap)
     return;
   }
 
-  info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, details->path));
+  info.GetReturnValue ().Set (String::NewFromUtf8 (isolate, details->path)
+      .ToLocalChecked ());
 }
 
 GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_update, GumV8ModuleMap)
@@ -669,6 +671,8 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_update, GumV8ModuleMap)
 
 GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_copy_values, GumV8ModuleMap)
 {
+  auto context = isolate->GetCurrentContext ();
+
   auto values = gum_module_map_get_values (self->handle);
   auto result = Array::New (isolate, values->len);
 
@@ -680,14 +684,14 @@ GUMJS_DEFINE_CLASS_METHOD (gumjs_module_map_copy_values, GumV8ModuleMap)
     _gum_v8_object_set_pointer (m, "base", details->range->base_address, core);
     _gum_v8_object_set_uint (m, "size", details->range->size, core);
     _gum_v8_object_set_utf8 (m, "path", details->path, core);
-    result->Set (i, m);
+    result->Set (context, i, m).Check ();
   }
 
   info.GetReturnValue ().Set (result);
 }
 
 static GumV8ModuleMap *
-gum_v8_module_map_new (Handle<Object> wrapper,
+gum_v8_module_map_new (Local<Object> wrapper,
                        GumModuleMap * handle,
                        GumV8Module * module)
 {
@@ -742,7 +746,7 @@ gum_v8_module_filter_matches (const GumModuleDetails * details,
 
   auto callback (Local<Function>::New (isolate, *self->callback));
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = { module };
+  Local<Value> argv[] = { module };
   Local<Value> result;
   if (callback->Call (context, recv, G_N_ELEMENTS (argv), argv)
       .ToLocal (&result))

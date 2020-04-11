@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C)      2019 Jon Wilson <jonwilson@zepler.net>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -111,6 +111,8 @@ gum_thumb_writer_init (GumThumbWriter * writer,
 {
   writer->ref_count = 1;
 
+  writer->target_os = gum_process_get_native_os ();
+
   writer->label_defs = NULL;
   writer->label_refs.data = NULL;
   writer->literal_refs.data = NULL;
@@ -155,8 +157,6 @@ void
 gum_thumb_writer_reset (GumThumbWriter * writer,
                         gpointer code_address)
 {
-  writer->target_os = gum_process_get_native_os ();
-
   writer->base = code_address;
   writer->code = code_address;
   writer->pc = GUM_ADDRESS (code_address);
@@ -412,6 +412,10 @@ static void
 gum_thumb_writer_put_argument_list_teardown (GumThumbWriter * self,
                                              guint n_args)
 {
+  if (n_args > 4)
+  {
+    gum_thumb_writer_put_add_reg_imm (self, ARM_REG_SP, (n_args - 4) * 4);
+  }
 }
 
 void

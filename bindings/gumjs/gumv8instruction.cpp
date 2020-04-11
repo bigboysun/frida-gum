@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2014-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -98,7 +98,7 @@ static const GumV8Function gumjs_instruction_functions[] =
 void
 _gum_v8_instruction_init (GumV8Instruction * self,
                           GumV8Core * core,
-                          Handle<ObjectTemplate> scope)
+                          Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -266,6 +266,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_instruction_parse)
   if (!_gum_v8_args_parse (args, "p", &target))
     return;
 
+  target = gum_strip_code_pointer (target);
+
   uint64_t address;
 #ifdef HAVE_ARM
   address = GPOINTER_TO_SIZE (target) & ~1;
@@ -420,6 +422,7 @@ gum_parse_operands (const cs_insn * insn,
 {
   auto core = module->core;
   auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
   auto x86 = &insn->detail->x86;
 
@@ -466,7 +469,7 @@ gum_parse_operands (const cs_insn * insn,
 
     _gum_v8_object_set_uint (element, "size", op->size, core);
 
-    elements->Set (op_index, element);
+    elements->Set (context, op_index, element).Check ();
   }
 
   return elements;
@@ -514,6 +517,7 @@ gum_parse_operands (const cs_insn * insn,
 {
   auto core = module->core;
   auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
   auto arm = &insn->detail->arm;
 
@@ -587,7 +591,7 @@ gum_parse_operands (const cs_insn * insn,
     _gum_v8_object_set (element, "subtracted",
         Boolean::New (isolate, op->subtracted), core);
 
-    elements->Set (op_index, element);
+    elements->Set (context, op_index, element).Check ();
   }
 
   return elements;
@@ -667,6 +671,7 @@ gum_parse_operands (const cs_insn * insn,
 {
   auto core = module->core;
   auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
   auto arm64 = &insn->detail->arm64;
 
@@ -763,7 +768,7 @@ gum_parse_operands (const cs_insn * insn,
       _gum_v8_object_set_uint (element, "vectorIndex", op->vector_index, core);
     }
 
-    elements->Set (op_index, element);
+    elements->Set (context, op_index, element).Check ();
   }
 
   return elements;
@@ -877,6 +882,7 @@ gum_parse_operands (const cs_insn * insn,
 {
   auto core = module->core;
   auto isolate = core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
   auto mips = &insn->detail->mips;
 
@@ -913,7 +919,7 @@ gum_parse_operands (const cs_insn * insn,
         g_assert_not_reached ();
     }
 
-    elements->Set (op_index, element);
+    elements->Set (context, op_index, element).Check ();
   }
 
   return elements;
@@ -947,6 +953,7 @@ gum_parse_regs (const uint16_t * regs,
                 GumV8Instruction * module)
 {
   auto isolate = module->core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
 
   auto elements = Array::New (isolate, count);
@@ -955,7 +962,8 @@ gum_parse_regs (const uint16_t * regs,
   {
     auto name = cs_reg_name (capstone, regs[reg_index]);
 
-    elements->Set (reg_index, _gum_v8_string_new_ascii (isolate, name));
+    elements->Set (context, reg_index,
+        _gum_v8_string_new_ascii (isolate, name)).Check ();
   }
 
   return elements;
@@ -967,6 +975,7 @@ gum_parse_groups (const uint8_t * groups,
                   GumV8Instruction * module)
 {
   auto isolate = module->core->isolate;
+  auto context = isolate->GetCurrentContext ();
   auto capstone = module->capstone;
 
   auto elements = Array::New (isolate, count);
@@ -975,7 +984,8 @@ gum_parse_groups (const uint8_t * groups,
   {
     auto name = cs_group_name (capstone, groups[group_index]);
 
-    elements->Set (group_index, _gum_v8_string_new_ascii (isolate, name));
+    elements->Set (context, group_index,
+        _gum_v8_string_new_ascii (isolate, name)).Check ();
   }
 
   return elements;

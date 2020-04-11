@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2018 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -16,6 +16,7 @@
 
 #include <TargetConditionals.h>
 #include <mach/mach.h>
+#include <sys/param.h>
 #if TARGET_OS_OSX
 # include <mach/mach_vm.h>
 #else
@@ -65,6 +66,7 @@ typedef arm_thread_state64_t GumDarwinNativeThreadState;
 #endif
 
 typedef struct _GumDarwinAllImageInfos GumDarwinAllImageInfos;
+typedef struct _GumDarwinMappingDetails GumDarwinMappingDetails;
 
 struct _GumDarwinAllImageInfos
 {
@@ -76,7 +78,17 @@ struct _GumDarwinAllImageInfos
 
   GumAddress notification_address;
 
+  gboolean libsystem_initialized;
+
   GumAddress dyld_image_load_address;
+};
+
+struct _GumDarwinMappingDetails
+{
+  gchar path[MAXPATHLEN];
+
+  guint64 offset;
+  guint64 size;
 };
 
 GUM_API gboolean gum_darwin_is_ios9_or_newer (void);
@@ -87,10 +99,15 @@ GUM_API gboolean gum_darwin_write (mach_port_t task, GumAddress address,
     const guint8 * bytes, gsize len);
 GUM_API gboolean gum_darwin_cpu_type_from_pid (pid_t pid,
     GumCpuType * cpu_type);
+GUM_API gboolean gum_darwin_query_ptrauth_support (mach_port_t task,
+    GumPtrauthSupport * ptrauth_support);
 GUM_API gboolean gum_darwin_query_page_size (mach_port_t task,
     guint * page_size);
+GUM_API const gchar * gum_darwin_query_sysroot (void);
 GUM_API gboolean gum_darwin_query_all_image_infos (mach_port_t task,
     GumDarwinAllImageInfos * infos);
+GUM_API gboolean gum_darwin_query_mapped_address (mach_port_t task,
+    GumAddress address, GumDarwinMappingDetails * details);
 GUM_API GumAddress gum_darwin_find_entrypoint (mach_port_t task);
 GUM_API void gum_darwin_enumerate_threads (mach_port_t task,
     GumFoundThreadFunc func, gpointer user_data);

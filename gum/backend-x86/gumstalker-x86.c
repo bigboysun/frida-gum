@@ -1,11 +1,9 @@
 /*
- * Copyright (C) 2009-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2009-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2010-2013 Karl Trygve Kalleberg <karltk@boblycat.org>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
-
-#define ENABLE_DEBUG 0
 
 #include "gumstalker.h"
 
@@ -28,11 +26,6 @@
 # include <psapi.h>
 # include <tchar.h>
 #endif
-#ifdef _MSC_VER
-# include <intrin.h>
-#else
-# include <cpuid.h>
-#endif
 
 #define GUM_CODE_ALIGNMENT                     8
 #define GUM_DATA_ALIGNMENT                     8
@@ -52,6 +45,8 @@ typedef struct _GumExecBlock GumExecBlock;
 typedef gpointer (GUM_THUNK * GumExecCtxReplaceCurrentBlockFunc) (
     GumExecCtx * ctx, gpointer start_address);
 
+typedef guint8 GumExecBlockState;
+typedef guint8 GumExecBlockFlags;
 typedef guint GumPrologType;
 typedef guint GumCodeContext;
 typedef struct _GumGeneratorContext GumGeneratorContext;
@@ -60,8 +55,6 @@ typedef struct _GumInstruction GumInstruction;
 typedef struct _GumBranchTarget GumBranchTarget;
 
 typedef guint GumVirtualizationRequirements;
-
-typedef guint GumCpuFeatures;
 
 struct _GumStalker
 {
@@ -193,7 +186,8 @@ struct _GumExecBlock
   guint8 * code_begin;
   guint8 * code_end;
 
-  guint8 state;
+  GumExecBlockState state;
+  GumExecBlockFlags flags;
   gint recycle_count;
 
 #ifdef G_OS_WIN32
@@ -204,11 +198,16 @@ struct _GumExecBlock
 #endif
 };
 
-enum _GumExecState
+enum _GumExecBlockState
 {
   GUM_EXEC_NORMAL,
   GUM_EXEC_SINGLE_STEPPING_ON_CALL,
   GUM_EXEC_SINGLE_STEPPING_THROUGH_CALL
+};
+
+enum _GumExecBlockFlags
+{
+  GUM_EXEC_ACTIVATION_TARGET = (1 << 0),
 };
 
 enum _GumPrologType
@@ -283,11 +282,6 @@ enum _GumVirtualizationRequirements
 
   GUM_REQUIRE_RELOCATION      = 1 << 0,
   GUM_REQUIRE_SINGLE_STEP     = 1 << 1
-};
-
-enum _GumCpuFeatures
-{
-  GUM_CPU_AVX2                = 1 << 0,
 };
 
 #define GUM_STALKER_LOCK(o) g_mutex_lock (&(o)->mutex)
@@ -458,10 +452,6 @@ static x86_insn gum_negate_jcc (x86_insn instruction_id);
 static gboolean gum_stalker_on_exception (GumExceptionDetails * details,
     gpointer user_data);
 #endif
-
-static GumCpuFeatures gum_query_cpu_features (void);
-static gboolean gum_get_cpuid (guint level, guint * a, guint * b, guint * c,
-    guint * d);
 
 static gpointer gum_find_thread_exit_implementation (void);
 #ifdef HAVE_DARWIN
@@ -989,6 +979,7 @@ _gum_stalker_do_activate (GumStalker * self,
   if (ctx == NULL)
     return;
 
+  ctx->unfollow_called_while_still_following = FALSE;
   ctx->activation_target = target;
 
   if (!gum_exec_ctx_contains (ctx, ret_addr))
@@ -1015,6 +1006,7 @@ _gum_stalker_do_deactivate (GumStalker * self,
   if (ctx == NULL)
     return;
 
+  ctx->unfollow_called_while_still_following = TRUE;
   ctx->activation_target = NULL;
 
   if (gum_exec_ctx_contains (ctx, *ret_addr_ptr))
@@ -1034,6 +1026,8 @@ gum_stalker_add_call_probe (GumStalker * self,
 {
   GumCallProbe probe;
   GArray * probes;
+
+  target_address = gum_strip_code_pointer (target_address);
 
   probe.id = g_atomic_int_add (&self->last_probe_id, 1) + 1;
   probe.callback = callback;
@@ -1360,6 +1354,22 @@ gum_exec_ctx_contains (GumExecCtx * ctx,
   return FALSE;
 }
 
+static gboolean
+gum_exec_ctx_may_now_backpatch (GumExecCtx * ctx,
+                                GumExecBlock * target_block)
+{
+  if (g_atomic_int_get (&ctx->state) != GUM_EXEC_CTX_ACTIVE)
+    return FALSE;
+
+  if ((target_block->flags & GUM_EXEC_ACTIVATION_TARGET) != 0)
+    return FALSE;
+
+  if (target_block->recycle_count < ctx->stalker->trust_threshold)
+    return FALSE;
+
+  return TRUE;
+}
+
 static gboolean counters_enabled = FALSE;
 static guint total_transitions = 0;
 
@@ -1417,14 +1427,11 @@ gum_exec_ctx_replace_current_block_with (GumExecCtx * ctx,
     ctx->invalidate_pending = FALSE;
   }
 
-  if (start_address == gum_stalker_unfollow_me)
+  if (start_address == gum_stalker_unfollow_me ||
+      start_address == gum_stalker_deactivate)
   {
     ctx->unfollow_called_while_still_following = TRUE;
     ctx->current_block = NULL;
-    ctx->resume_at = start_address;
-  }
-  else if (start_address == gum_stalker_deactivate)
-  {
     ctx->resume_at = start_address;
   }
   else if (start_address == _gum_thread_exit_impl)
@@ -1444,7 +1451,10 @@ gum_exec_ctx_replace_current_block_with (GumExecCtx * ctx,
         &ctx->resume_at);
 
     if (start_address == ctx->activation_target)
+    {
       ctx->activation_target = NULL;
+      ctx->current_block->flags |= GUM_EXEC_ACTIVATION_TARGET;
+    }
 
     gum_exec_ctx_maybe_unfollow (ctx, start_address);
   }
@@ -1472,63 +1482,6 @@ gum_exec_ctx_destroy_thunks (GumExecCtx * ctx)
 {
   gum_free_pages (ctx->thunks);
 }
-
-#if ENABLE_DEBUG
-
-static void
-gum_disasm (guint8 * code,
-            guint size,
-            const gchar * prefix)
-{
-  csh capstone;
-  cs_err err;
-  cs_insn * insn;
-  size_t count, i;
-
-  err = cs_open (CS_ARCH_X86, GUM_CPU_MODE, &capstone);
-  g_assert (err == CS_ERR_OK);
-
-  count = cs_disasm (capstone, code, size, GPOINTER_TO_SIZE (code), 0, &insn);
-  g_assert (insn != NULL);
-
-  for (i = 0; i != count; i++)
-  {
-    printf ("%s0x%" G_GINT64_MODIFIER "x\t%s %s\n",
-        prefix, insn[i].address, insn[i].mnemonic, insn[i].op_str);
-  }
-
-  cs_free (insn, count);
-
-  cs_close (&capstone);
-}
-
-static void
-gum_hexdump (guint8 * data, guint size, const gchar * prefix)
-{
-  guint i, line_offset;
-
-  line_offset = 0;
-  for (i = 0; i != size; i++)
-  {
-    if (line_offset == 0)
-      printf ("%s0x%" G_GINT64_MODIFIER "x\t%02x",
-          prefix, (guint64) GPOINTER_TO_SIZE (data + i), data[i]);
-    else
-      printf (" %02x", data[i]);
-
-    line_offset++;
-    if (line_offset == 16 && i != size - 1)
-    {
-      printf ("\n");
-      line_offset = 0;
-    }
-  }
-
-  if (line_offset != 0)
-    printf ("\n");
-}
-
-#endif
 
 static GumExecBlock *
 gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
@@ -1582,10 +1535,6 @@ gum_exec_ctx_obtain_block_for (GumExecCtx * ctx,
   gc.continuation_real_address = NULL;
   gc.opened_prolog = GUM_PROLOG_NONE;
   gc.accumulated_stack_delta = 0;
-
-#if ENABLE_DEBUG
-  printf ("\n\n***\n\nCreating block for %p:\n", real_address);
-#endif
 
   iterator.exec_context = ctx;
   iterator.exec_block = block;
@@ -1658,16 +1607,7 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
       gum_x86_relocator_skip_one_no_label (rl);
     }
 
-#if ENABLE_DEBUG
-    {
-      guint8 * begin = block->code_end;
-      block->code_end = gum_x86_writer_cur (gc->code_writer);
-      gum_disasm (begin, block->code_end - begin, "\t");
-      gum_hexdump (begin, block->code_end - begin, "\t; ");
-    }
-#else
     block->code_end = gum_x86_writer_cur (gc->code_writer);
-#endif
 
     if (gum_exec_block_is_full (block))
     {
@@ -1688,11 +1628,6 @@ gum_stalker_iterator_next (GumStalkerIterator * self,
 
   instruction->begin = GSIZE_TO_POINTER (instruction->ci->address);
   instruction->end = instruction->begin + instruction->ci->size;
-
-#if ENABLE_DEBUG
-  gum_disasm (instruction->begin, instruction->end - instruction->begin, "");
-  gum_hexdump (instruction->begin, instruction->end - instruction->begin, "; ");
-#endif
 
   self->generator_context->instruction = instruction;
 
@@ -2632,6 +2567,7 @@ gum_exec_block_new (GumExecCtx * ctx)
     block->code_end = block->code_begin;
 
     block->state = GUM_EXEC_NORMAL;
+    block->flags = 0;
     block->recycle_count = 0;
 
     slab->offset += block->code_begin - (slab->data + slab->offset);
@@ -2712,8 +2648,7 @@ gum_exec_block_backpatch_call (GumExecBlock * block,
 
   ctx = block->ctx;
 
-  if (g_atomic_int_get (&ctx->state) == GUM_EXEC_CTX_ACTIVE &&
-      block->recycle_count >= ctx->stalker->trust_threshold)
+  if (gum_exec_ctx_may_now_backpatch (ctx, block))
   {
     GumX86Writer * cw = &ctx->code_writer;
 
@@ -2771,8 +2706,7 @@ gum_exec_block_backpatch_jmp (GumExecBlock * block,
 
   ctx = block->ctx;
 
-  if (g_atomic_int_get (&ctx->state) == GUM_EXEC_CTX_ACTIVE &&
-      block->recycle_count >= ctx->stalker->trust_threshold)
+  if (gum_exec_ctx_may_now_backpatch (ctx, block))
   {
     GumX86Writer * cw = &ctx->code_writer;
 
@@ -2801,8 +2735,7 @@ gum_exec_block_backpatch_ret (GumExecBlock * block,
 
   ctx = block->ctx;
 
-  if (g_atomic_int_get (&ctx->state) == GUM_EXEC_CTX_ACTIVE &&
-      block->recycle_count >= ctx->stalker->trust_threshold)
+  if (gum_exec_ctx_may_now_backpatch (ctx, block))
   {
     GumX86Writer * cw = &ctx->code_writer;
 
@@ -2825,8 +2758,7 @@ gum_exec_block_backpatch_inline_cache (GumExecBlock * block,
 
   ctx = block->ctx;
 
-  if (g_atomic_int_get (&ctx->state) == GUM_EXEC_CTX_ACTIVE &&
-      block->recycle_count >= ctx->stalker->trust_threshold)
+  if (gum_exec_ctx_may_now_backpatch (ctx, block))
   {
     guint offset;
 
@@ -3319,12 +3251,15 @@ gum_exec_block_write_call_invoke_code (GumExecBlock * block,
   gum_x86_writer_put_add_reg_imm (cw, GUM_REG_XSP,
       GUM_THUNK_ARGLIST_STACK_RESERVE);
 
-  gum_x86_writer_put_mov_reg_near_ptr (cw, GUM_REG_XAX,
-      GUM_ADDRESS (&block->ctx->current_block));
-  gum_x86_writer_put_call_address_with_aligned_arguments (cw, GUM_CALL_CAPI,
-      GUM_ADDRESS (gum_exec_block_backpatch_ret), 2,
-      GUM_ARG_REGISTER, GUM_REG_XAX,
-      GUM_ARG_ADDRESS, GUM_ADDRESS (ret_code_address));
+  if (block->ctx->stalker->trust_threshold >= 0)
+  {
+    gum_x86_writer_put_mov_reg_near_ptr (cw, GUM_REG_XAX,
+        GUM_ADDRESS (&block->ctx->current_block));
+    gum_x86_writer_put_call_address_with_aligned_arguments (cw, GUM_CALL_CAPI,
+        GUM_ADDRESS (gum_exec_block_backpatch_ret), 2,
+        GUM_ARG_REGISTER, GUM_REG_XAX,
+        GUM_ARG_ADDRESS, GUM_ADDRESS (ret_code_address));
+  }
 
   gum_exec_ctx_write_epilog (block->ctx, GUM_PROLOG_MINIMAL, cw);
   gum_x86_writer_put_jmp_near_ptr (cw, GUM_ADDRESS (&block->ctx->resume_at));
@@ -4129,58 +4064,6 @@ gum_stalker_dump_counters (void)
   g_printerr ("\n");
 
   GUM_PRINT_ENTRYGATE_COUNTER (jmp_continuation);
-}
-
-static GumCpuFeatures
-gum_query_cpu_features (void)
-{
-  GumCpuFeatures features = 0;
-  guint a, b, c, d;
-
-  if (gum_get_cpuid (7, &a, &b, &c, &d))
-  {
-    if ((b & (1 << 5)) != 0)
-      features |= GUM_CPU_AVX2;
-  }
-
-  return features;
-}
-
-static gboolean
-gum_get_cpuid (guint level,
-               guint * a,
-               guint * b,
-               guint * c,
-               guint * d)
-{
-#ifdef _MSC_VER
-  gint info[40];
-  guint n;
-
-  __cpuid (info, 0);
-  n = info[0];
-  if (n < level)
-    return FALSE;
-
-  __cpuid (info, level);
-
-  *a = info[0];
-  *b = info[1];
-  *c = info[2];
-  *d = info[3];
-
-  return TRUE;
-#else
-  guint n;
-
-  n = __get_cpuid_max (0, NULL);
-  if (n < level)
-    return FALSE;
-
-  __cpuid_count (level, 0, *a, *b, *c, *d);
-
-  return TRUE;
-#endif
 }
 
 static gpointer

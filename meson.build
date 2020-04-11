@@ -1,6 +1,12 @@
 project('frida-gum', 'c', 'cpp',
   version: '1.0.0',
-  default_options: ['c_std=gnu99', 'cpp_std=c++11'],
+  meson_version: '>=0.54.0',
+  default_options: [
+    'c_std=gnu99',
+    'cpp_std=c++11',
+    'cpp_eh=none',
+    'cpp_rtti=false',
+  ],
 )
 
 gum_version = meson.project_version()
@@ -33,20 +39,31 @@ endif
 languages = ['c', 'cpp']
 if host_os_family == 'darwin'
   languages += ['objc', 'objcpp']
-  add_languages('objc', 'objcpp')
+  add_languages('objc', 'objcpp', native: false)
 endif
 
 cc = meson.get_compiler('c')
 
 frida_component_cflags = []
-buildtype = get_option('buildtype')
-if buildtype == 'release' or buildtype == 'minsize'
+if get_option('optimization') in ['2', '3', 's'] and not get_option('debug')
   frida_component_cflags += [
     '-DG_DISABLE_ASSERT',
     '-DG_DISABLE_CHECKS',
     '-DG_DISABLE_CAST_CHECKS',
   ]
 endif
+
+have_ptrauth_src = '''#ifdef __clang__
+# if __has_feature (ptrauth_calls)
+#  define HAVE_PTRAUTH 1
+# endif
+#endif
+
+#ifndef HAVE_PTRAUTH
+# error Pointer authentication not supported
+#endif
+'''
+have_ptrauth = cc.compiles(have_ptrauth_src, name: 'pointer authentication')
 
 target_conditionals_prefix = '#include <TargetConditionals.h>'
 
@@ -72,6 +89,10 @@ if cc.has_header('android/api-level.h')
   host_os = 'android'
 endif
 
+if host_arch == 'arm64' and have_ptrauth
+  host_abi = 'arm64e'
+endif
+
 cdata = configuration_data()
 
 cdata.set('HAVE_' + host_os_family.to_upper(), 1)
@@ -91,6 +112,10 @@ foreach d : cpu_defines
     cdata.set(d.get(1), 1)
   endif
 endforeach
+
+if have_ptrauth
+  cdata.set('HAVE_PTRAUTH', 1)
+endif
 
 headers = [
   'elf.h',
@@ -203,14 +228,14 @@ else
 endif
 
 if host_os_family == 'windows'
-  tls_provider_dep = dependency('glib-schannel-static', required: false)
+  tls_provider_dep = dependency('gioschannel', required: false)
   if tls_provider_dep.found()
-    cdata.set('HAVE_GLIB_SCHANNEL_STATIC', 1)
+    cdata.set('HAVE_GIOSCHANNEL', 1)
   endif
 else
-  tls_provider_dep = dependency('glib-openssl-static', required: false)
+  tls_provider_dep = dependency('gioopenssl', required: false)
   if tls_provider_dep.found()
-    cdata.set('HAVE_GLIB_OPENSSL_STATIC', 1)
+    cdata.set('HAVE_GIOOPENSSL', 1)
   endif
 endif
 
@@ -245,12 +270,12 @@ if have_gumjs
     cdata.set('HAVE_DUKTAPE', 1)
   endif
 
-  v8_dep = dependency('v8-7.0', version: '>=7.6.48', required: get_option('v8'))
+  v8_dep = dependency('v8-8.0', version: '>=8.3.125', required: get_option('v8'))
   have_v8 = v8_dep.found()
   if have_v8
     cdata.set('HAVE_V8', 1)
     gumjs_extra_deps += [v8_dep]
-    gumjs_extra_requires += ['v8-7.0']
+    gumjs_extra_requires += ['v8-8.0']
   endif
 
   if not (have_duktape or have_v8)

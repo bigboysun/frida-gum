@@ -11,6 +11,40 @@ namespace Gum {
 	public void recover_from_fork_in_parent ();
 	public void recover_from_fork_in_child ();
 
+	public void * sign_code_pointer (void * value);
+	public void * strip_code_pointer (void * value);
+	public Gum.Address sign_code_address (Gum.Address value);
+	public Gum.Address strip_code_address (Gum.Address value);
+	public Gum.PtrauthSupport query_ptrauth_support ();
+
+	public uint query_page_size ();
+	public bool query_is_rwx_supported ();
+	public Gum.RwxSupport query_rwx_support ();
+
+	public void ensure_code_readable (void * address, size_t size);
+
+	public void mprotect (void * address, size_t size, Gum.PageProtection page_prot);
+	public bool try_mprotect (void * address, size_t size, Gum.PageProtection page_prot);
+
+	public void clear_cache (void * address, size_t size);
+
+	public uint peek_private_memory_usage ();
+
+	public void * malloc (size_t size);
+	public void * malloc0 (size_t size);
+	public void * calloc (size_t count, size_t size);
+	public void * realloc (void * mem, size_t size);
+	public void * memalign (size_t alignment, size_t size);
+	public void * memdup (void * mem, size_t byte_size);
+	public void free (void * mem);
+
+	public void * alloc_n_pages (uint n_pages, Gum.PageProtection page_prot);
+	public void * try_alloc_n_pages (uint n_pages, Gum.PageProtection page_prot);
+	public void * alloc_n_pages_near (uint n_pages, Gum.PageProtection page_prot, Gum.AddressSpec address_spec);
+	public void * try_alloc_n_pages_near (uint n_pages, Gum.PageProtection page_prot, Gum.AddressSpec address_spec);
+	public void query_page_allocation_range (void * mem, uint size, out Gum.MemoryRange range);
+	public void free_pages (void * mem);
+
 	[CCode (cprefix = "GUM_CODE_SIGNING_")]
 	public enum CodeSigningPolicy {
 		OPTIONAL,
@@ -25,11 +59,26 @@ namespace Gum {
 
 	[CCode (cprefix = "GUM_CPU_")]
 	public enum CpuType {
+		INVALID,
 		IA32,
 		AMD64,
 		ARM,
 		ARM64,
 		MIPS,
+	}
+
+	[CCode (cprefix = "GUM_PTRAUTH_")]
+	public enum PtrauthSupport {
+		INVALID,
+		UNSUPPORTED,
+		SUPPORTED
+	}
+
+	[CCode (cprefix = "GUM_RWX_")]
+	public enum RwxSupport {
+		NONE,
+		ALLOCATIONS_ONLY,
+		FULL
 	}
 
 	public class Interceptor : GLib.Object {
@@ -167,6 +216,7 @@ namespace Gum {
 	namespace Process {
 		public Gum.CodeSigningPolicy get_code_signing_policy ();
 		public void set_code_signing_policy (Gum.CodeSigningPolicy policy);
+		public unowned string query_libc_name ();
 		public bool is_debugger_attached ();
 		public Gum.ThreadId get_current_thread_id ();
 		public bool modify_thread (Gum.ThreadId thread_id, Gum.Process.ModifyThreadFunc func);
@@ -198,11 +248,27 @@ namespace Gum {
 	}
 
 	namespace Memory {
+		public bool is_readable (void * address, size_t len);
 		public uint8[] read (Address address, size_t len);
 		public bool write (Address address, uint8[] bytes);
+		public bool patch_code (void * address, size_t size, Gum.Memory.PatchApplyFunc apply);
+		public bool mark_code (void * address, size_t size);
+
 		public void scan (Gum.MemoryRange range, Gum.MatchPattern pattern, Gum.Memory.ScanMatchFunc func);
 
+		public void * allocate (void * address, size_t size, size_t alignment, Gum.PageProtection page_prot);
+		public bool free (void * address, size_t size);
+		public bool release (void * address, size_t size);
+		public bool commit (void * address, size_t size, Gum.PageProtection page_prot);
+		public bool decommit (void * address, size_t size);
+
+		public delegate void PatchApplyFunc (void * mem);
 		public delegate bool ScanMatchFunc (Address address, size_t size);
+	}
+
+	namespace InternalHeap {
+		public void ref ();
+		public void unref ();
 	}
 
 	namespace Cloak {
@@ -425,6 +491,16 @@ namespace Gum {
 		}
 	}
 
+	public struct AddressSpec {
+		public AddressSpec (void * near_address, size_t max_distance) {
+			this.near_address = near_address;
+			this.max_distance = max_distance;
+		}
+
+		public void * near_address;
+		public size_t max_distance;
+	}
+
 	public struct MemoryRange {
 		public MemoryRange (Address base_address, size_t size) {
 			this.base_address = base_address;
@@ -599,9 +675,9 @@ namespace Gum {
 			HEADER_ONLY = (1 << 0),
 		}
 
-		public DarwinModule.from_file (string path, Gum.DarwinPort task, Gum.CpuType cpu_type, uint page_size, GLib.MappedFile? cache_file = null, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
-		public DarwinModule.from_blob (GLib.Bytes blob, Gum.DarwinPort task, Gum.CpuType cpu_type, uint page_size, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
-		public DarwinModule.from_memory (string? name, Gum.DarwinPort task, Gum.CpuType cpu_type, uint page_size, Gum.Address base_address, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
+		public DarwinModule.from_file (string path, Gum.CpuType cpu_type, Gum.PtrauthSupport ptrauth_support, GLib.MappedFile? cache_file = null, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
+		public DarwinModule.from_blob (GLib.Bytes blob, Gum.CpuType cpu_type, Gum.PtrauthSupport ptrauth_support, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
+		public DarwinModule.from_memory (string? name, Gum.DarwinPort task, Gum.Address base_address, Gum.DarwinModule.Flags flags = NONE) throws GLib.Error;
 
 		public bool resolve_export (string symbol, out Gum.DarwinExportDetails details);
 		public Gum.Address resolve_symbol_address (string symbol);
@@ -677,6 +753,21 @@ namespace Gum {
 		public int64 addend;
 	}
 
+	public struct DarwinThreadedItem {
+		public bool is_authenticated;
+		public Gum.DarwinThreadedItemType type;
+		public uint16 delta;
+		public uint8 key;
+		public bool has_address_diversity;
+		public uint16 diversity;
+
+		public uint16 bind_ordinal;
+
+		public Gum.Address rebase_address;
+
+		public static void parse (uint64 value, out Gum.DarwinThreadedItem result);
+	}
+
 	public struct DarwinInitPointersDetails {
 		public Gum.Address address;
 		public uint64 count;
@@ -730,6 +821,14 @@ namespace Gum {
 		POINTER = 1,
 		TEXT_ABSOLUTE32,
 		TEXT_PCREL32,
+		THREADED_TABLE,
+		THREADED_ITEMS,
+	}
+
+	[CCode (cprefix = "GUM_DARWIN_THREADED_")]
+	public enum DarwinThreadedItemType {
+		REBASE,
+		BIND
 	}
 
 	[CCode (cprefix = "GUM_DARWIN_BIND_")]

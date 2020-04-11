@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2015 Asger Hautop Drewsen <asgerdrewsen@gmail.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -7,14 +7,16 @@
 
 #include "gumprocess-priv.h"
 
+#include "gum-init.h"
 #include "gumdarwin.h"
 #include "gumdarwinmodule.h"
 #include "gumleb.h"
 
 #include <dlfcn.h>
 #include <errno.h>
-#include <gio/gio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <gio/gio.h>
 #include <mach-o/dyld.h>
 #include <mach-o/nlist.h>
 #include <malloc/malloc.h>
@@ -42,12 +44,12 @@
     (*((type *) ((guint8 *) thread + field)))
 
 #if defined (HAVE_ARM64) && !defined (__DARWIN_OPAQUE_ARM_THREAD_STATE64)
-# define __darwin_arm_thread_state64_get_pc(ts) \
-    ((ts).__pc)
+# define __darwin_arm_thread_state64_get_pc_fptr(ts) \
+    ((void *) (uintptr_t) ((ts).__pc))
 # define __darwin_arm_thread_state64_set_pc_fptr(ts, fptr) \
     ((ts).__pc = (uintptr_t) (fptr))
-# define __darwin_arm_thread_state64_get_lr(ts) \
-    ((ts).__lr)
+# define __darwin_arm_thread_state64_get_lr_fptr(ts) \
+    ((void *) (uintptr_t) ((ts).__lr))
 # define __darwin_arm_thread_state64_set_lr_fptr(ts, fptr) \
     ((ts).__lr = (uintptr_t) (fptr))
 # define __darwin_arm_thread_state64_get_sp(ts) \
@@ -281,6 +283,9 @@ static void gum_emit_malloc_ranges (task_t task,
     void * user_data, unsigned type, vm_range_t * ranges, unsigned count);
 static kern_return_t gum_read_malloc_memory (task_t remote_task,
     vm_address_t remote_address, vm_size_t size, void ** local_memory);
+#ifdef HAVE_I386
+static void gum_deinit_sysroot (void);
+#endif
 static gboolean gum_probe_range_for_entrypoint (const GumRangeDetails * details,
     gpointer user_data);
 static gboolean gum_store_range_of_potential_modules (
@@ -315,6 +320,12 @@ static gboolean gum_darwin_fill_file_mapping (gint pid,
     struct proc_regionwithpathinfo * region);
 static void gum_darwin_clamp_range_size (GumMemoryRange * range,
     GumFileMapping * file);
+
+const gchar *
+gum_process_query_libc_name (void)
+{
+  return "/usr/lib/libSystem.B.dylib";
+}
 
 gboolean
 gum_process_is_debugger_attached (void)
@@ -807,7 +818,7 @@ gum_module_find_export_by_name (const gchar * module_name,
     if (name == NULL)
       return 0;
 
-    if (strcmp (name, "/usr/lib/dyld") == 0)
+    if (g_str_has_prefix (name, "/usr/lib/dyld"))
     {
       GumDarwinModuleResolver * resolver;
       GumDarwinModule * dm;
@@ -900,6 +911,48 @@ gum_darwin_cpu_type_from_pid (pid_t pid,
   return TRUE;
 }
 
+#ifdef HAVE_I386
+
+const gchar *
+gum_darwin_query_sysroot (void)
+{
+  static gsize cached_result = 0;
+
+  if (g_once_init_enter (&cached_result))
+  {
+    gchar * result = NULL;
+    const gchar * program_path;
+
+    program_path = _dyld_get_image_name (0);
+
+    if (g_str_has_suffix (program_path, "/usr/lib/dyld_sim"))
+    {
+      result = g_strndup (program_path, strlen (program_path) - 17);
+      _gum_register_destructor (gum_deinit_sysroot);
+    }
+
+    g_once_init_leave (&cached_result, GPOINTER_TO_SIZE (result) + 1);
+  }
+
+  return GSIZE_TO_POINTER (cached_result - 1);
+}
+
+static void
+gum_deinit_sysroot (void)
+{
+  g_free ((gchar *) gum_darwin_query_sysroot ());
+}
+
+#else
+
+const gchar *
+gum_darwin_query_sysroot (void)
+{
+  return NULL;
+}
+
+#endif
+
 gboolean
 gum_darwin_query_all_image_infos (mach_port_t task,
                                   GumDarwinAllImageInfos * infos)
@@ -973,6 +1026,8 @@ gum_darwin_query_all_image_infos (mach_port_t task,
 
     infos->notification_address = all_info->notification;
 
+    infos->libsystem_initialized = all_info->libsystem_initialized;
+
     infos->dyld_image_load_address = all_info->dyld_image_load_address;
 
     g_free (all_info_malloc_data);
@@ -1004,10 +1059,39 @@ gum_darwin_query_all_image_infos (mach_port_t task,
 
     infos->notification_address = all_info->notification;
 
+    infos->libsystem_initialized = all_info->libsystem_initialized;
+
     infos->dyld_image_load_address = all_info->dyld_image_load_address;
 
     g_free (all_info_malloc_data);
   }
+
+  return TRUE;
+}
+
+gboolean
+gum_darwin_query_mapped_address (mach_port_t task,
+                                 GumAddress address,
+                                 GumDarwinMappingDetails * details)
+{
+  int pid;
+  kern_return_t kr;
+  GumFileMapping file;
+  struct proc_regionwithpathinfo region;
+  guint64 mapping_offset;
+
+  kr = pid_for_task (task, &pid);
+  if (kr != KERN_SUCCESS)
+    return FALSE;
+
+  if (!gum_darwin_fill_file_mapping (pid, address, &file, &region))
+    return FALSE;
+
+  g_strlcpy (details->path, file.path, sizeof (details->path));
+
+  mapping_offset = address - region.prp_prinfo.pri_address;
+  details->offset = mapping_offset;
+  details->size = region.prp_prinfo.pri_size - mapping_offset;
 
   return TRUE;
 }
@@ -1194,6 +1278,8 @@ gum_darwin_enumerate_modules (mach_port_t task,
 {
   GumDarwinAllImageInfos infos;
   gboolean inprocess;
+  const gchar * sysroot;
+  guint sysroot_size;
   gsize i;
   gpointer info_array, info_array_malloc_data = NULL;
   gpointer header_data, header_data_end, header_malloc_data = NULL;
@@ -1208,6 +1294,9 @@ gum_darwin_enumerate_modules (mach_port_t task,
     goto fallback;
 
   inprocess = task == mach_task_self ();
+
+  sysroot = inprocess ? gum_darwin_query_sysroot () : NULL;
+  sysroot_size = (sysroot != NULL) ? strlen (sysroot) : 0;
 
   if (inprocess)
   {
@@ -1369,6 +1458,8 @@ gum_darwin_enumerate_modules (mach_port_t task,
     details.name = name;
     details.range = &dylib_range;
     details.path = file_path;
+    if (sysroot != NULL && g_str_has_prefix (file_path, sysroot))
+      details.path += sysroot_size;
 
     carry_on = func (&details, user_data);
 
@@ -1628,12 +1719,12 @@ gum_darwin_fill_file_mapping (gint pid,
   gint retval, len;
 
   retval = __proc_info (PROC_INFO_CALL_PIDINFO, pid, PROC_PIDREGIONPATHINFO,
-      (uint64_t) address,  region, sizeof (struct proc_regionwithpathinfo));
+      (uint64_t) address, region, sizeof (struct proc_regionwithpathinfo));
 
   if (retval == -1)
     return FALSE;
 
-  len = strnlen (region->prp_vip.vip_path, MAXPATHLEN);
+  len = strnlen (region->prp_vip.vip_path, MAXPATHLEN - 1);
   region->prp_vip.vip_path[len] = '\0';
 
   if (len == 0)
@@ -1968,13 +2059,23 @@ find_image_address_and_slide (const gchar * image_name,
                               gpointer * address,
                               gpointer * slide)
 {
-  guint count, i;
+  const gchar * sysroot;
+  guint sysroot_size, count, i;
+
+  sysroot = gum_darwin_query_sysroot ();
+  sysroot_size = (sysroot != NULL) ? strlen (sysroot) : 0;
 
   count = _dyld_image_count ();
 
   for (i = 0; i != count; i++)
   {
-    if (gum_module_path_equals (_dyld_get_image_name (i), image_name))
+    const gchar * candidate_name;
+
+    candidate_name = _dyld_get_image_name (i);
+    if (sysroot != NULL && g_str_has_prefix (candidate_name, sysroot))
+      candidate_name += sysroot_size;
+
+    if (gum_module_path_equals (candidate_name, image_name))
     {
       *address = (gpointer) _dyld_get_image_header (i);
       *slide = (gpointer) _dyld_get_image_vmaddr_slide (i);
@@ -2070,7 +2171,7 @@ gum_darwin_is_unified_thread_state_valid (const GumDarwinUnifiedThreadState * ts
 #elif defined (HAVE_ARM)
   return ts->ts_32.__pc != 0;
 #elif defined (HAVE_ARM64)
-  return __darwin_arm_thread_state64_get_pc (ts->ts_64) != 0;
+  return __darwin_arm_thread_state64_get_pc_fptr (ts->ts_64) != NULL;
 #endif
 }
 
@@ -2128,13 +2229,13 @@ gum_darwin_parse_native_thread_state (const GumDarwinNativeThreadState * ts,
 #elif defined (HAVE_ARM64)
   guint n;
 
-  ctx->pc = __darwin_arm_thread_state64_get_pc (*ts);
+  ctx->pc = GPOINTER_TO_SIZE (__darwin_arm_thread_state64_get_pc_fptr (*ts));
   ctx->sp = __darwin_arm_thread_state64_get_sp (*ts);
 
   for (n = 0; n != G_N_ELEMENTS (ctx->x); n++)
     ctx->x[n] = ts->__x[n];
   ctx->fp = __darwin_arm_thread_state64_get_fp (*ts);
-  ctx->lr = __darwin_arm_thread_state64_get_lr (*ts);
+  ctx->lr = GPOINTER_TO_SIZE (__darwin_arm_thread_state64_get_lr_fptr (*ts));
 #endif
 }
 

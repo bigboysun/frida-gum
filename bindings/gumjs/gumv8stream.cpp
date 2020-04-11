@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2016-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -149,7 +149,7 @@ static const GumV8Function gumjs_output_stream_functions[] =
 void
 _gum_v8_stream_init (GumV8Stream * self,
                      GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                     Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -227,7 +227,7 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_io_stream_construct)
 
   {
     auto ctor (Local<FunctionTemplate>::New (isolate, *module->input_stream));
-    Handle<Value> argv[] = {
+    Local<Value> argv[] = {
       External::New (isolate, g_object_ref (
           g_io_stream_get_input_stream (stream)))
     };
@@ -238,7 +238,7 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_io_stream_construct)
 
   {
     auto ctor (Local<FunctionTemplate>::New (isolate, *module->output_stream));
-    Handle<Value> argv[] = {
+    Local<Value> argv[] = {
       External::New (isolate, g_object_ref (
           g_io_stream_get_output_stream (stream)))
     };
@@ -320,11 +320,11 @@ gum_v8_close_io_stream_operation_finish (GIOStream * stream,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
     }
 
-    Handle<Value> argv[] = { error_value, success_value };
+    Local<Value> argv[] = { error_value, success_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -389,11 +389,11 @@ gum_v8_close_input_operation_finish (GInputStream * stream,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
     }
 
-    Handle<Value> argv[] = { error_value, success_value };
+    Local<Value> argv[] = { error_value, success_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -493,28 +493,27 @@ gum_v8_read_operation_finish (GInputStream * stream,
     {
       error_value = Exception::Error (
           String::NewFromUtf8 (isolate,
-              (error != NULL) ? error->message : "Short read"));
-      data_value = ArrayBuffer::New (isolate, self->buffer, bytes_read,
-          ArrayBufferCreationMode::kInternalized);
-      self->buffer = NULL; /* steal it */
+              (error != NULL) ? error->message : "Short read")
+          .ToLocalChecked ());
+      data_value = _gum_v8_array_buffer_new_take (isolate,
+          g_steal_pointer (&self->buffer), bytes_read);
     }
     else if (error == NULL)
     {
       error_value = null_value;
-      data_value = ArrayBuffer::New (isolate, self->buffer, bytes_read,
-          ArrayBufferCreationMode::kInternalized);
-      self->buffer = NULL; /* steal it */
+      data_value = _gum_v8_array_buffer_new_take (isolate,
+          g_steal_pointer (&self->buffer), bytes_read);
     }
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       data_value = null_value;
     }
 
     g_clear_error (&error);
 
-    Handle<Value> argv[] = { error_value, data_value };
+    Local<Value> argv[] = { error_value, data_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -579,11 +578,11 @@ gum_v8_close_output_operation_finish (GOutputStream * stream,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
       g_error_free (error);
     }
 
-    Handle<Value> argv[] = { error_value, success_value };
+    Local<Value> argv[] = { error_value, success_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -702,7 +701,8 @@ gum_v8_write_operation_finish (GOutputStream * stream,
     {
       error_value = Exception::Error (
           String::NewFromUtf8 (isolate,
-              (error != NULL) ? error->message : "Short write"));
+              (error != NULL) ? error->message : "Short write")
+          .ToLocalChecked ());
     }
     else if (error == NULL)
     {
@@ -711,12 +711,12 @@ gum_v8_write_operation_finish (GOutputStream * stream,
     else
     {
       error_value = Exception::Error (
-          String::NewFromUtf8 (isolate, error->message));
+          String::NewFromUtf8 (isolate, error->message).ToLocalChecked ());
     }
 
     g_clear_error (&error);
 
-    Handle<Value> argv[] = { error_value, size_value };
+    Local<Value> argv[] = { error_value, size_value };
     auto callback (Local<Function>::New (isolate, *self->callback));
     auto recv = Undefined (isolate);
     auto res = callback->Call (context, recv, G_N_ELEMENTS (argv), argv);
@@ -749,7 +749,7 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_native_input_stream_construct)
   auto context = isolate->GetCurrentContext ();
   auto base_ctor (Local<FunctionTemplate>::New (isolate,
       *module->input_stream));
-  Handle<Value> argv[] = { External::New (isolate, stream) };
+  Local<Value> argv[] = { External::New (isolate, stream) };
   base_ctor->GetFunction (context).ToLocalChecked ()
       ->Call (context, wrapper, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
 }
@@ -777,7 +777,7 @@ GUMJS_DEFINE_CONSTRUCTOR (gumjs_native_output_stream_construct)
   auto context = isolate->GetCurrentContext ();
   auto base_ctor (Local<FunctionTemplate>::New (isolate,
       *module->output_stream));
-  Handle<Value> argv[] = { External::New (isolate, stream) };
+  Local<Value> argv[] = { External::New (isolate, stream) };
   base_ctor->GetFunction (context).ToLocalChecked ()
       ->Call (context, wrapper, G_N_ELEMENTS (argv), argv).ToLocalChecked ();
 }

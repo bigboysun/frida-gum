@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2016-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2016-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -489,6 +489,8 @@ catch_mach_exception_raise_state_identity (
 # error Unsupported architecture
 #endif
 
+  ed.address = gum_strip_code_pointer (ed.address);
+
   switch (exception)
   {
     case EXC_BAD_ACCESS:
@@ -658,8 +660,6 @@ gum_exceptor_backend_on_signal (int sig,
 
     if (old_sigaction != NULL)
       old_sigaction (sig, siginfo, context);
-    else
-      goto panic;
   }
   else
   {
@@ -667,13 +667,8 @@ gum_exceptor_backend_on_signal (int sig,
 
     if (gum_is_signal_handler_chainable (old_handler))
       old_handler (sig);
-    else if (action->sa_handler != SIG_IGN)
-      goto panic;
   }
 
-  return;
-
-panic:
   self->old_abort_handler_present = FALSE;
   signal (SIGABRT, SIG_DFL);
 }
@@ -1129,11 +1124,17 @@ gum_exception_port_set_extract (GumExceptionPortSet * self,
                                 exception_behavior_array_t old_behaviors,
                                 exception_flavor_array_t old_flavors)
 {
-  memcpy (masks, self->masks, sizeof (self->masks));
-  *masks_count = self->count;
-  memcpy (old_handlers, self->handlers, sizeof (self->handlers));
-  memcpy (old_behaviors, self->behaviors, sizeof (self->behaviors));
-  memcpy (old_flavors, self->flavors, sizeof (self->flavors));
+  size_t max_size = *masks_count * sizeof (mach_port_t);
+
+  memcpy (masks, self->masks,
+      MIN (max_size, sizeof (self->masks)));
+  *masks_count = MIN (*masks_count, self->count);
+  memcpy (old_handlers, self->handlers,
+      MIN (max_size, sizeof (self->handlers)));
+  memcpy (old_behaviors, self->behaviors,
+      MIN (max_size, sizeof (self->behaviors)));
+  memcpy (old_flavors, self->flavors,
+      MIN (max_size, sizeof (self->flavors)));
 }
 
 static void

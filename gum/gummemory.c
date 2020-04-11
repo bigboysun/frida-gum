@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -11,6 +11,9 @@
 #include "gumlibc.h"
 #include "gummemory-priv.h"
 
+#ifdef HAVE_PTRAUTH
+# include <ptrauth.h>
+#endif
 #include <string.h>
 
 #ifdef HAVE_IOS
@@ -112,6 +115,58 @@ gum_internal_heap_unref (void)
   _gum_memory_backend_deinit ();
 }
 
+gpointer
+gum_sign_code_pointer (gpointer value)
+{
+#ifdef HAVE_PTRAUTH
+  return ptrauth_sign_unauthenticated (value, ptrauth_key_asia, 0);
+#else
+  return value;
+#endif
+}
+
+gpointer
+gum_strip_code_pointer (gpointer value)
+{
+#ifdef HAVE_PTRAUTH
+  return ptrauth_strip (value, ptrauth_key_asia);
+#else
+  return value;
+#endif
+}
+
+GumAddress
+gum_sign_code_address (GumAddress value)
+{
+#ifdef HAVE_PTRAUTH
+  return GPOINTER_TO_SIZE (ptrauth_sign_unauthenticated (
+      GSIZE_TO_POINTER (value), ptrauth_key_asia, 0));
+#else
+  return value;
+#endif
+}
+
+GumAddress
+gum_strip_code_address (GumAddress value)
+{
+#ifdef HAVE_PTRAUTH
+  return GPOINTER_TO_SIZE (ptrauth_strip (
+      GSIZE_TO_POINTER (value), ptrauth_key_asia));
+#else
+  return value;
+#endif
+}
+
+GumPtrauthSupport
+gum_query_ptrauth_support (void)
+{
+#ifdef HAVE_PTRAUTH
+  return GUM_PTRAUTH_SUPPORTED;
+#else
+  return GUM_PTRAUTH_UNSUPPORTED;
+#endif
+}
+
 guint
 gum_query_page_size (void)
 {
@@ -203,6 +258,8 @@ gum_memory_patch_code (gpointer address,
   guint8 * start_page, * end_page;
   gsize page_offset, range_size;
   gboolean rwx_supported;
+
+  address = gum_strip_code_pointer (address);
 
   page_size = gum_query_page_size ();
   start_page = GSIZE_TO_POINTER (GPOINTER_TO_SIZE (address) & ~(page_size - 1));

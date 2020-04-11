@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  * Copyright (C) 2015 Marc Hartmayer <hello@hartmayer.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
@@ -122,9 +122,12 @@ TESTLIST_BEGIN (script)
     TESTENTRY (utf16_string_can_be_written)
     TESTENTRY (utf16_string_can_be_allocated)
 #ifdef G_OS_WIN32
-    TESTENTRY (ansi_string_can_be_read)
-    TESTENTRY (ansi_string_can_be_written)
-    TESTENTRY (ansi_string_can_be_allocated)
+    TESTENTRY (ansi_string_can_be_read_in_code_page_936)
+    TESTENTRY (ansi_string_can_be_read_in_code_page_1252)
+    TESTENTRY (ansi_string_can_be_written_in_code_page_936)
+    TESTENTRY (ansi_string_can_be_written_in_code_page_1252)
+    TESTENTRY (ansi_string_can_be_allocated_in_code_page_936)
+    TESTENTRY (ansi_string_can_be_allocated_in_code_page_1252)
 #endif
     TESTENTRY (invalid_read_results_in_exception)
     TESTENTRY (invalid_write_results_in_exception)
@@ -145,6 +148,7 @@ TESTLIST_BEGIN (script)
     TESTENTRY (process_platform_is_available)
     TESTENTRY (process_page_size_is_available)
     TESTENTRY (process_pointer_size_is_available)
+    TESTENTRY (process_should_support_nested_signal_handling)
 #ifndef HAVE_QNX
     TESTENTRY (process_debugger_status_is_available)
 #endif
@@ -192,6 +196,7 @@ TESTLIST_BEGIN (script)
   TESTGROUP_BEGIN ("Socket")
     TESTENTRY (socket_connection_can_be_established)
     TESTENTRY (socket_connection_can_be_established_with_tls)
+    TESTENTRY (socket_connection_should_not_leak_on_error)
     TESTENTRY (socket_type_can_be_inspected)
 #if !defined (HAVE_ANDROID) && !(defined (HAVE_LINUX) && \
     defined (HAVE_ARM)) && !(defined (HAVE_LINUX) && defined (HAVE_MIPS))
@@ -215,6 +220,7 @@ TESTLIST_BEGIN (script)
     TESTENTRY (native_pointer_provides_is_null)
     TESTENTRY (native_pointer_provides_arithmetic_operations)
     TESTENTRY (native_pointer_provides_uint32_conversion_functionality)
+    TESTENTRY (native_pointer_provides_ptrauth_functionality)
     TESTENTRY (native_pointer_to_match_pattern)
     TESTENTRY (native_pointer_can_be_constructed_from_64bit_value)
   TESTGROUP_END ()
@@ -240,6 +246,8 @@ TESTLIST_BEGIN (script)
     TESTENTRY (native_function_crash_results_in_exception)
     TESTENTRY (nested_native_function_crash_is_handled_gracefully)
     TESTENTRY (variadic_native_function_can_be_invoked)
+    TESTENTRY (variadic_native_function_args_smaller_than_int_should_be_promoted)
+    TESTENTRY (variadic_native_function_float_args_should_be_promoted_to_double)
     TESTENTRY (native_function_is_a_native_pointer)
   TESTGROUP_END ()
 
@@ -272,6 +280,7 @@ TESTLIST_BEGIN (script)
     TESTENTRY (cmodule_should_provide_some_builtin_string_functions)
     TESTENTRY (cmodule_should_support_floating_point)
     TESTENTRY (cmodule_should_support_varargs)
+    TESTENTRY (cmodule_should_support_global_callbacks)
     TESTENTRY (cmodule_should_provide_access_to_cpu_registers)
   TESTGROUP_END ()
 
@@ -306,6 +315,7 @@ TESTLIST_BEGIN (script)
 
   TESTENTRY (script_can_be_compiled_to_bytecode)
   TESTENTRY (script_can_be_reloaded)
+  TESTENTRY (script_should_not_leak_if_destroyed_before_load)
   TESTENTRY (script_memory_usage)
   TESTENTRY (source_maps_should_be_supported_for_our_runtime)
   TESTENTRY (source_maps_should_be_supported_for_user_scripts)
@@ -334,6 +344,8 @@ static gboolean ignore_thread (GumInterceptor * interceptor);
 static gboolean unignore_thread (GumInterceptor * interceptor);
 
 static gint gum_clobber_system_error (gint value);
+static gint gum_assert_variadic_uint8_values_are_sane (gpointer a, gpointer b,
+    gpointer c, gpointer d, ...);
 static gint gum_get_answer_to_life_universe_and_everything (void);
 static gint gum_toupper (gchar * str, gint limit);
 static gint64 gum_classify_timestamp (gint64 timestamp);
@@ -350,8 +362,10 @@ static void on_read_ready (GObject * source_object, GAsyncResult * res,
     gpointer user_data);
 #endif
 
+#if defined (HAVE_I386) || defined (HAVE_ARM64)
 static gpointer run_stalked_through_hooked_function (gpointer data);
 static gpointer run_stalked_through_target_function (gpointer data);
+#endif
 
 static gpointer sleeping_dummy (gpointer data);
 
@@ -1169,7 +1183,45 @@ TESTCASE (variadic_native_function_can_be_invoked)
   EXPECT_SEND_MESSAGE_WITH ("1");
   EXPECT_SEND_MESSAGE_WITH ("6");
   EXPECT_NO_MESSAGES ();
+}
 
+TESTCASE (variadic_native_function_args_smaller_than_int_should_be_promoted)
+{
+  COMPILE_AND_LOAD_SCRIPT (
+      "var f = new NativeFunction(" GUM_PTR_CONST ", 'int', "
+          "['pointer', 'pointer', 'pointer', 'pointer', '...', "
+          "'uint8', 'pointer', 'uint8']);"
+      "var val = NULL.not();"
+      "send(f(val, val, val, val, 13, val, 37));",
+      gum_assert_variadic_uint8_values_are_sane);
+  EXPECT_SEND_MESSAGE_WITH ("42");
+}
+
+static gint
+gum_assert_variadic_uint8_values_are_sane (gpointer a,
+                                           gpointer b,
+                                           gpointer c,
+                                           gpointer d,
+                                           ...)
+{
+  va_list args;
+  gint e;
+  gint g;
+
+  va_start (args, d);
+  e = va_arg (args, gint);
+  va_arg (args, gpointer);
+  g = va_arg (args, gint);
+  va_end (args);
+
+  g_assert_cmphex (e, ==, 13);
+  g_assert_cmphex (g, ==, 37);
+
+  return 42;
+}
+
+TESTCASE (variadic_native_function_float_args_should_be_promoted_to_double)
+{
   COMPILE_AND_LOAD_SCRIPT (
       "var sum = new NativeFunction(" GUM_PTR_CONST ", "
           "'int', ['pointer', '...', 'pointer', 'float']);"
@@ -1521,6 +1573,62 @@ TESTCASE (native_pointer_provides_uint32_conversion_functionality)
 {
   COMPILE_AND_LOAD_SCRIPT ("send(ptr(1).toUInt32());");
   EXPECT_SEND_MESSAGE_WITH ("1");
+}
+
+TESTCASE (native_pointer_provides_ptrauth_functionality)
+{
+#ifdef HAVE_PTRAUTH
+  COMPILE_AND_LOAD_SCRIPT (
+      "var original = ptr(1);"
+
+      "var a = original.sign();"
+      "send(a.equals(original));"
+      "send(a.strip().equals(original));"
+
+      "send(original.sign('ia').equals(a));"
+      "send(original.sign('ib').equals(a));"
+      "send(original.sign('da').equals(a));"
+      "send(original.sign('db').equals(a));"
+
+      "var b = original.sign('ia', ptr(1337));"
+      "send(b.equals(a));"
+      "var c = original.sign('ia', 1337);"
+      "send(c.equals(b));"
+      "var d = original.sign('ia', ptr(1337).blend(42));"
+      "send(d.equals(b));"
+
+      "try {"
+          "original.sign('x');"
+      "} catch (e) {"
+          "send(e.message);"
+      "}");
+
+  EXPECT_SEND_MESSAGE_WITH ("false");
+  EXPECT_SEND_MESSAGE_WITH ("true");
+
+  EXPECT_SEND_MESSAGE_WITH ("true");
+  EXPECT_SEND_MESSAGE_WITH ("false");
+  EXPECT_SEND_MESSAGE_WITH ("false");
+  EXPECT_SEND_MESSAGE_WITH ("false");
+
+  EXPECT_SEND_MESSAGE_WITH ("false");
+  EXPECT_SEND_MESSAGE_WITH ("true");
+  EXPECT_SEND_MESSAGE_WITH ("false");
+
+  EXPECT_SEND_MESSAGE_WITH ("\"invalid key\"");
+#else
+  COMPILE_AND_LOAD_SCRIPT (
+      "var original = ptr(1);"
+      "send(original.sign() === original);"
+      "send(original.strip() === original);"
+      "send(original.blend(42) === original);");
+
+  EXPECT_SEND_MESSAGE_WITH ("true");
+  EXPECT_SEND_MESSAGE_WITH ("true");
+  EXPECT_SEND_MESSAGE_WITH ("true");
+#endif
+
+  EXPECT_NO_MESSAGES ();
 }
 
 TESTCASE (native_pointer_to_match_pattern)
@@ -2199,6 +2307,55 @@ TESTCASE (socket_connection_can_be_established_with_tls)
   }
 }
 
+TESTCASE (socket_connection_should_not_leak_on_error)
+{
+  if (!g_test_slow ())
+  {
+    g_print("<skipping, run in slow mode> ");
+    return;
+  }
+
+  PUSH_TIMEOUT (5000);
+  COMPILE_AND_LOAD_SCRIPT (
+      "var tries = 0;"
+      "var port = 28300;"
+      "var firstErrorMessage = null;"
+      ""
+      "tryNext();"
+      ""
+      "function tryNext() {"
+      "  tries++;"
+      "  if (tries === 200) {"
+      "    send('done');"
+      "    return;"
+      "  }"
+      ""
+      "  Socket.connect({"
+      "    family: 'ipv4',"
+      "    host: 'localhost',"
+      "    port: port,"
+      "  })"
+      "  .then(function (connection) {"
+      "    console.log('success');"
+      "    tries--;"
+      "    port++;"
+      "    tryNext();"
+      "  })"
+      "  .catch(function (error) {"
+      "    if (firstErrorMessage === null) {"
+      "      firstErrorMessage = error.message;"
+      "    } else if (error.message !== firstErrorMessage) {"
+      "      send('Expected \"' + firstErrorMessage + '\" but got \"' +"
+      "          error.message + '\"');"
+      "      return;"
+      "    }"
+      "    console.log('tries=' + tries + ' error=\"' + error.message + '\"');"
+      "    tryNext();"
+      "  });"
+      "}");
+  EXPECT_SEND_MESSAGE_WITH ("\"done\"");
+}
+
 TESTCASE (socket_type_can_be_inspected)
 {
   int fd;
@@ -2523,7 +2680,7 @@ TESTCASE (execution_can_be_traced_during_immediate_native_function_call)
       "  onCallSummary: function (summary) {"
       "    if (!flushing)"
       "      return;"
-      "    var key = ptr(a).toString();"
+      "    var key = a.strip().toString();"
       "    send(key in summary);"
       "    send(summary[key]);"
       "  }"
@@ -2562,7 +2719,7 @@ TESTCASE (execution_can_be_traced_during_scheduled_native_function_call)
       "  onCallSummary: function (summary) {"
       "    if (!flushing)"
       "      return;"
-      "    var key = ptr(a).toString();"
+      "    var key = a.strip().toString();"
       "    send(key in summary);"
       "    send(summary[key]);"
       "  }"
@@ -2619,7 +2776,7 @@ TESTCASE (execution_can_be_traced_after_native_function_call_from_hook)
       "  },"
       "  onCallSummary: function (summary) {"
       "    [targetFuncInt, targetFuncNestedA].forEach(function (target) {"
-      "      var key = ptr(target).toString();"
+      "      var key = target.strip().toString();"
       "      send(key in summary);"
       "      send(summary[key]);"
       "    });"
@@ -2811,6 +2968,32 @@ TESTCASE (process_pointer_size_is_available)
   EXPECT_SEND_MESSAGE_WITH (G_STRINGIFY (GLIB_SIZEOF_VOID_P));
 }
 
+TESTCASE (process_should_support_nested_signal_handling)
+{
+#ifdef HAVE_LINUX
+  gpointer page;
+
+  page = gum_alloc_n_pages (1, GUM_PAGE_NO_ACCESS);
+
+  COMPILE_AND_LOAD_SCRIPT ("Process.setExceptionHandler(function (details) {"
+          "Memory.protect(" GUM_PTR_CONST ", Process.pageSize, 'rw-');"
+          "try {"
+              "ptr(42).readU8();"
+          "} catch (e) {"
+              "send('error');"
+          "};"
+          "return true;"
+      "});", page);
+
+  *((guint8 *) page) = 1;
+  EXPECT_SEND_MESSAGE_WITH ("\"error\"");
+
+  gum_free_pages ((gpointer) page);
+#else
+  g_print ("<skipping, only supported on Linux for now> ");
+#endif
+}
+
 TESTCASE (process_debugger_status_is_available)
 {
   COMPILE_AND_LOAD_SCRIPT ("send(Process.isDebuggerAttached());");
@@ -2967,13 +3150,13 @@ TESTCASE (process_module_can_be_looked_up_from_address)
   g_module_close (m);
 
   COMPILE_AND_LOAD_SCRIPT (
-      "send(Process.findModuleByAddress(" GUM_PTR_CONST ") !== null);",
+      "send(Process.findModuleByAddress(" GUM_PTR_CONST ".strip()) !== null);",
       f);
   EXPECT_SEND_MESSAGE_WITH ("true");
 
   COMPILE_AND_LOAD_SCRIPT (
       "send(Object.keys(Process.getModuleByAddress(" GUM_PTR_CONST
-      ")).length > 0);",
+      ".strip())).length > 0);",
       f);
   EXPECT_SEND_MESSAGE_WITH ("true");
 #endif
@@ -3129,7 +3312,7 @@ TESTCASE (process_range_can_be_looked_up_from_address)
   g_module_close (m);
 
   COMPILE_AND_LOAD_SCRIPT (
-      "send(Process.findRangeByAddress(" GUM_PTR_CONST ") !== null);",
+      "send(Process.findRangeByAddress(" GUM_PTR_CONST ".strip()) !== null);",
       f);
   EXPECT_SEND_MESSAGE_WITH ("true");
 
@@ -3144,7 +3327,7 @@ TESTCASE (process_range_can_be_looked_up_from_address)
 
   COMPILE_AND_LOAD_SCRIPT (
       "send(Object.keys(Process.getRangeByAddress(" GUM_PTR_CONST
-      ")).length > 0);",
+      ".strip())).length > 0);",
       f);
   EXPECT_SEND_MESSAGE_WITH ("true");
 }
@@ -5572,13 +5755,83 @@ TESTCASE (utf16_string_can_be_allocated)
 
 #ifdef G_OS_WIN32
 
-TESTCASE (ansi_string_can_be_read)
+TESTCASE (ansi_string_can_be_read_in_code_page_936)
 {
-  const gchar * str_utf8 = "Bjørheimsbygd";
-  gunichar2 * str_utf16 = g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
-  gchar str[64];
-  WideCharToMultiByte (CP_THREAD_ACP, 0, (LPCWSTR) str_utf16, -1,
-      (LPSTR) str, sizeof (str), NULL, NULL);
+  CPINFOEX cpi;
+  const gchar * str_utf8;
+  WCHAR * str_utf16;
+  gchar str[13 + 1];
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 936)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 936> ");
+    return;
+  }
+
+  str_utf8 = "test测试.";
+  str_utf16 = g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
+  WideCharToMultiByte (CP_THREAD_ACP, 0, str_utf16, -1, str, sizeof (str),
+      NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST "));",
+      str);
+  EXPECT_SEND_MESSAGE_WITH ("\"test测试.\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST
+      ", 5));", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"test?\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST
+      ", 6));", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"test测\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST
+      ", 0));", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST
+      ", -1));", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"test测试.\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(" GUM_PTR_CONST
+      ", int64(-1)));", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"test测试.\"");
+
+  COMPILE_AND_LOAD_SCRIPT ("send(Memory.readAnsiString(ptr(\"0\")));", str);
+  EXPECT_SEND_MESSAGE_WITH ("null");
+
+  g_free (str_utf16);
+
+  str_utf8 = "Bjørheimsbygd";
+  str_utf16 = g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
+  WideCharToMultiByte (CP_THREAD_ACP, 0, str_utf16, -1, str, sizeof (str),
+      NULL, NULL);
+
+  COMPILE_AND_LOAD_SCRIPT ("send(" GUM_PTR_CONST ".readAnsiString());", str);
+  EXPECT_SEND_MESSAGE_WITH ("\"Bj?rheimsbygd\"");
+
+  g_free (str_utf16);
+}
+
+TESTCASE (ansi_string_can_be_read_in_code_page_1252)
+{
+  CPINFOEX cpi;
+  const gchar * str_utf8;
+  WCHAR * str_utf16;
+  gchar str[13 + 1];
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 1252)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 1252> ");
+    return;
+  }
+
+  str_utf8 = "Bjørheimsbygd";
+  str_utf16 = g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
+  WideCharToMultiByte (CP_THREAD_ACP, 0, str_utf16, -1, str, sizeof (str),
+      NULL, NULL);
 
   COMPILE_AND_LOAD_SCRIPT ("send(" GUM_PTR_CONST ".readAnsiString());", str);
   EXPECT_SEND_MESSAGE_WITH ("\"Bjørheimsbygd\"");
@@ -5602,16 +5855,61 @@ TESTCASE (ansi_string_can_be_read)
   g_free (str_utf16);
 }
 
-TESTCASE (ansi_string_can_be_written)
+TESTCASE (ansi_string_can_be_written_in_code_page_936)
 {
-  gchar str_ansi[17];
-  gunichar2 str_utf16[17];
+  CPINFOEX cpi;
+  gchar str_ansi[13 + 1];
+  gunichar2 str_utf16[13 + 1];
   gchar * str_utf8;
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 936)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 936> ");
+    return;
+  }
+
+  strcpy (str_ansi, "truncate-plz");
+  COMPILE_AND_LOAD_SCRIPT (GUM_PTR_CONST ".writeAnsiString('test测试.');",
+      str_ansi);
+  MultiByteToWideChar (CP_THREAD_ACP, 0, str_ansi, -1,
+      str_utf16, sizeof (str_utf16));
+  str_utf8 = g_utf16_to_utf8 (str_utf16, -1, NULL, NULL, NULL);
+  g_assert_cmpstr (str_utf8, == , "test测试.");
+  g_free (str_utf8);
+  g_assert_cmphex (str_ansi[9], == , '\0');
+  g_assert_cmphex (str_ansi[10], == , 'l');
+  g_assert_cmphex (str_ansi[11], == , 'z');
+  g_assert_cmphex (str_ansi[12], == , '\0');
+
+  COMPILE_AND_LOAD_SCRIPT (GUM_PTR_CONST ".writeAnsiString('Bjørheimsbygd');",
+      str_ansi);
+  MultiByteToWideChar (CP_THREAD_ACP, 0, str_ansi, -1,
+      str_utf16, sizeof (str_utf16));
+  str_utf8 = g_utf16_to_utf8 (str_utf16, -1, NULL, NULL, NULL);
+  g_assert_cmpstr (str_utf8, == , "Bj?rheimsbygd");
+  g_free (str_utf8);
+}
+
+TESTCASE (ansi_string_can_be_written_in_code_page_1252)
+{
+  CPINFOEX cpi;
+  gchar str_ansi[16 + 1];
+  gunichar2 str_utf16[16 + 1];
+  gchar * str_utf8;
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 1252)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 1252> ");
+    return;
+  }
 
   strcpy (str_ansi, "Kjempeforhaustar");
   COMPILE_AND_LOAD_SCRIPT (GUM_PTR_CONST ".writeAnsiString('Bjørheimsbygd');",
       str_ansi);
-  MultiByteToWideChar (CP_ACP, 0, str_ansi, -1, str_utf16, sizeof (str_utf16));
+  MultiByteToWideChar (CP_THREAD_ACP, 0, str_ansi, -1,
+      str_utf16, sizeof (str_utf16));
   str_utf8 = g_utf16_to_utf8 (str_utf16, -1, NULL, NULL, NULL);
   g_assert_cmpstr (str_utf8, == , "Bjørheimsbygd");
   g_free (str_utf8);
@@ -5621,8 +5919,34 @@ TESTCASE (ansi_string_can_be_written)
   g_assert_cmphex (str_ansi[16], == , '\0');
 }
 
-TESTCASE (ansi_string_can_be_allocated)
+TESTCASE (ansi_string_can_be_allocated_in_code_page_936)
 {
+  CPINFOEX cpi;
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 936)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 936> ");
+    return;
+  }
+
+  COMPILE_AND_LOAD_SCRIPT ("send("
+      "Memory.allocAnsiString('test测试.').readAnsiString()"
+      ");");
+  EXPECT_SEND_MESSAGE_WITH ("\"test测试.\"");
+}
+
+TESTCASE (ansi_string_can_be_allocated_in_code_page_1252)
+{
+  CPINFOEX cpi;
+
+  GetCPInfoEx (CP_THREAD_ACP, 0, &cpi);
+  if (cpi.CodePage != 1252)
+  {
+    g_print ("<skipping, only available on systems with ANSI code page 1252> ");
+    return;
+  }
+
   COMPILE_AND_LOAD_SCRIPT ("send("
       "Memory.allocAnsiString('Bjørheimsbygd').readAnsiString()"
       ");");
@@ -6038,12 +6362,21 @@ TESTCASE (cmodule_can_be_used_with_stalker_transform)
       "  while (gum_stalker_iterator_next (iterator, &insn))\\n"
       "  {\\n"
       "    printf (\"\\\\t%%s %%s\\\\n\", insn->mnemonic, insn->op_str);\\n"
+      "#if defined (HAVE_I386)\\n"
       "    if (insn->id == X86_INS_RET)\\n"
       "    {\\n"
       "      gum_x86_writer_put_nop (output);\\n"
       "      gum_stalker_iterator_put_callout (iterator, on_ret, NULL,\\n"
       "          NULL);\\n"
       "    }\\n"
+      "#elif defined (HAVE_ARM64)\\n"
+      "    if (insn->id == ARM64_INS_RET)\\n"
+      "    {\\n"
+      "      gum_arm64_writer_put_nop (output);\\n"
+      "      gum_stalker_iterator_put_callout (iterator, on_ret, NULL,\\n"
+      "          NULL);\\n"
+      "    }\\n"
+      "#endif\\n"
       "    gum_stalker_iterator_keep (iterator);\\n"
       "  }\\n"
       "  numTransforms++;\\n"
@@ -6467,6 +6800,47 @@ TESTCASE (cmodule_should_support_varargs)
   EXPECT_NO_MESSAGES ();
 }
 
+TESTCASE (cmodule_should_support_global_callbacks)
+{
+  COMPILE_AND_LOAD_SCRIPT (
+      "var cb = new NativeCallback(function (n) { send(n); }, 'void', ['int']);"
+      "var cbPtr = Memory.alloc(Process.pointerSize);"
+      "cbPtr.writePointer(cb);"
+      ""
+      "var m = new CModule('"
+      "\\n"
+      "extern void notify1 (int n);\\n"
+      "extern void (* notify2) (int n);\\n"
+      "extern void (* notify3) (int n);\\n"
+      "\\n"
+      "static void notify3_impl (int n);\\n"
+      "\\n"
+      "void\\n"
+      "init (void)\\n"
+      "{\\n"
+      "  notify1 (42);\\n"
+      "  notify2 (43);\\n"
+      "  notify3 = notify3_impl;\\n"
+      "  notify3 (44);\\n"
+      "}\\n"
+      "\\n"
+      "static void\\n"
+      "notify3_impl (int n)\\n"
+      "{\\n"
+      "  notify1 (n);\\n"
+      "}\\n"
+      "\\n"
+      "', {"
+      "  notify1: cb,"
+      "  notify2: cbPtr,"
+      "  notify3: Memory.alloc(Process.pointerSize)"
+      "});");
+  EXPECT_SEND_MESSAGE_WITH ("42");
+  EXPECT_SEND_MESSAGE_WITH ("43");
+  EXPECT_SEND_MESSAGE_WITH ("44");
+  EXPECT_NO_MESSAGES ();
+}
+
 TESTCASE (cmodule_should_provide_access_to_cpu_registers)
 {
   int seen_value = -1;
@@ -6593,6 +6967,23 @@ TESTCASE (script_can_be_reloaded)
   EXPECT_NO_MESSAGES ();
   gum_script_load_sync (fixture->script, NULL);
   EXPECT_SEND_MESSAGE_WITH ("\"undefined\"");
+}
+
+TESTCASE (script_should_not_leak_if_destroyed_before_load)
+{
+  GumExceptor * held_instance;
+  guint ref_count_before;
+  GumScript * script;
+
+  held_instance = gum_exceptor_obtain ();
+  ref_count_before = G_OBJECT (held_instance)->ref_count;
+
+  script = gum_script_backend_create_sync (fixture->backend, "testcase",
+      "console.log('Hello World');", NULL, NULL);
+  g_object_unref (script);
+
+  g_assert_cmpuint (G_OBJECT (held_instance)->ref_count, ==, ref_count_before);
+  g_object_unref (held_instance);
 }
 
 TESTCASE (script_memory_usage)
@@ -6727,6 +7118,7 @@ TESTCASE (source_maps_should_be_supported_for_user_scripts)
       "FDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTs7QUNiQT"
       "tBQUNBO0FBQ0E7QUFDQTtBQUNBO0FBQ0E7QUFDQTtBQUNBIiwiZmlsZSI6ImdlbmVyYXRlZC"
       "5qcyIsInNvdXJjZVJvb3QiOiIifQ=="                                      "\n"
+      "// And potentially some trailing code..."                            "\n"
   );
 
   item = test_script_fixture_pop_message (fixture);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2010-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -200,7 +200,7 @@ static const GumV8Function gumjs_memory_access_monitor_functions[] =
 void
 _gum_v8_memory_init (GumV8Memory * self,
                      GumV8Core * core,
-                     Handle<ObjectTemplate> scope)
+                     Local<ObjectTemplate> scope)
 {
   auto isolate = core->isolate;
 
@@ -346,7 +346,7 @@ gum_memory_patch_context_apply (gpointer mem,
   auto context = isolate->GetCurrentContext ();
 
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = { _gum_v8_native_pointer_new (mem, self->core) };
+  Local<Value> argv[] = { _gum_v8_native_pointer_new (mem, self->core) };
   auto result = self->apply->Call (context, recv, G_N_ELEMENTS (argv), argv);
   self->has_pending_exception = result.IsEmpty ();
 }
@@ -359,6 +359,8 @@ GUMJS_DEFINE_FUNCTION (gumjs_memory_check_code_pointer)
 
   if (!_gum_v8_args_parse (args, "p", &ptr))
     return;
+
+  ptr = (const guint8 *) gum_strip_code_pointer ((gpointer) ptr);
 
 #ifdef HAVE_ARM
   ptr = (const guint8 *) GSIZE_TO_POINTER (GPOINTER_TO_SIZE (ptr) & ~1);
@@ -389,6 +391,7 @@ gum_v8_memory_read (GumMemoryValueType type,
   gssize length = -1;
   GumExceptorScope scope;
   Local<Value> result;
+  std::shared_ptr<BackingStore> store;
 
   switch (type)
   {
@@ -463,11 +466,9 @@ gum_v8_memory_read (GumMemoryValueType type,
 
         if (length > 0)
         {
-          guint8 dummy_to_trap_bad_pointer_early;
-          memcpy (&dummy_to_trap_bad_pointer_early, data, sizeof (guint8));
-
-          result = ArrayBuffer::New (isolate, g_memdup (data, length), length,
-              ArrayBufferCreationMode::kInternalized);
+          result = ArrayBuffer::New (isolate, length);
+          store = result.As<ArrayBuffer> ()->GetBackingStore ();
+          memcpy (store->Data (), data, length);
         }
         else
         {
@@ -491,7 +492,7 @@ gum_v8_memory_read (GumMemoryValueType type,
           memcpy (&dummy_to_trap_bad_pointer_early, data, sizeof (guint8));
 
           gchar * str = g_utf8_make_valid (data, length);
-          result = String::NewFromUtf8 (isolate, str, String::kNormalString);
+          result = String::NewFromUtf8 (isolate, str).ToLocalChecked ();
           g_free (str);
         }
         else
@@ -524,8 +525,8 @@ gum_v8_memory_read (GumMemoryValueType type,
             break;
           }
 
-          result = String::NewFromUtf8 (isolate, data, String::kNormalString,
-              length);
+          result = String::NewFromUtf8 (isolate, data, NewStringType::kNormal,
+              length).ToLocalChecked ();
         }
         else
         {
@@ -560,7 +561,7 @@ gum_v8_memory_read (GumMemoryValueType type,
         if (size != 0)
         {
           result = String::NewFromUtf8 (isolate, str_utf8,
-              String::kNormalString, size);
+              NewStringType::kNormal, size).ToLocalChecked ();
         }
         else
         {
@@ -590,7 +591,7 @@ gum_v8_memory_read (GumMemoryValueType type,
           auto size = g_utf8_offset_to_pointer (str_utf8,
               g_utf8_strlen (str_utf8, -1)) - str_utf8;
           result = String::NewFromUtf8 (isolate, str_utf8,
-              String::kNormalString, size);
+              NewStringType::kNormal, size).ToLocalChecked ();
           g_free (str_utf8);
         }
         else
@@ -800,26 +801,38 @@ gum_ansi_string_to_utf8 (const gchar * str_ansi,
   if (length < 0)
     length = (gint) strlen (str_ansi);
 
-  auto str_utf16_size = (guint) ((length + 1) * sizeof (WCHAR));
-  auto str_utf16 = (WCHAR *) g_malloc (str_utf16_size);
-  MultiByteToWideChar (CP_ACP, 0, str_ansi, length, str_utf16, str_utf16_size);
-  str_utf16[length] = L'\0';
-  auto str_utf8 = g_utf16_to_utf8 ((gunichar2 *) str_utf16, -1, NULL, NULL,
-      NULL);
+  gint str_utf16_length = MultiByteToWideChar (CP_THREAD_ACP, 0,
+      str_ansi, length, NULL, 0);
+  gsize str_utf16_size = (str_utf16_length + 1) * sizeof (WCHAR);
+  WCHAR * str_utf16 = (WCHAR *) g_malloc (str_utf16_size);
+
+  str_utf16_length = MultiByteToWideChar (CP_THREAD_ACP, 0, str_ansi, length,
+      str_utf16, str_utf16_length);
+  str_utf16[str_utf16_length] = L'\0';
+
+  gchar * str_utf8 =
+      g_utf16_to_utf8 ((gunichar2 *) str_utf16, -1, NULL, NULL, NULL);
+
   g_free (str_utf16);
+
   return str_utf8;
 }
 
 static gchar *
 gum_ansi_string_from_utf8 (const gchar * str_utf8)
 {
-  auto str_utf16 = g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
-  guint str_ansi_size = WideCharToMultiByte (CP_ACP, 0, (LPCWSTR) str_utf16, -1,
+  auto str_utf16 = (WCHAR *)
+      g_utf8_to_utf16 (str_utf8, -1, NULL, NULL, NULL);
+
+  gint str_ansi_size = WideCharToMultiByte (CP_THREAD_ACP, 0, str_utf16, -1,
       NULL, 0, NULL, NULL);
   auto str_ansi = (gchar *) g_malloc (str_ansi_size);
-  WideCharToMultiByte (CP_ACP, 0, (LPCWSTR) str_utf16, -1, str_ansi,
-      str_ansi_size, NULL, NULL);
+
+  WideCharToMultiByte (CP_THREAD_ACP, 0, str_utf16, -1,
+      str_ansi, str_ansi_size, NULL, NULL);
+
   g_free (str_utf16);
+
   return str_ansi;
 }
 
@@ -956,7 +969,9 @@ gum_memory_scan_context_run (GumMemoryScanContext * self)
 
     auto on_error = Local<Function>::New (isolate, *self->on_error);
     auto recv = Undefined (isolate);
-    Handle<Value> argv[] = { String::NewFromUtf8 (isolate, message) };
+    Local<Value> argv[] = {
+      String::NewFromUtf8 (isolate, message).ToLocalChecked ()
+    };
     auto result = on_error->Call (context, recv, G_N_ELEMENTS (argv), argv);
     _gum_v8_ignore_result (result);
 
@@ -986,7 +1001,7 @@ gum_memory_scan_context_emit_match (GumAddress address,
   gboolean proceed = TRUE;
   auto on_match = Local<Function>::New (isolate, *self->on_match);
   auto recv = Undefined (isolate);
-  Handle<Value> argv[] = {
+  Local<Value> argv[] = {
     _gum_v8_native_pointer_new (GSIZE_TO_POINTER (address), self->core),
     Integer::NewFromUnsigned (isolate, size)
   };
@@ -1151,7 +1166,7 @@ gum_v8_memory_on_access (GumMemoryAccessMonitor * monitor,
   _gum_v8_object_set_uint (d, "pagesTotal", details->pages_total, core);
 
   auto on_access (Local<Function>::New (isolate, *self->on_access));
-  Handle<Value> argv[] = { d };
+  Local<Value> argv[] = { d };
   auto result = on_access->Call (isolate->GetCurrentContext (),
       Undefined (isolate), G_N_ELEMENTS (argv), argv);
   (void) result;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015-2019 Ole André Vadla Ravnås <oleavr@nowsecure.com>
+ * Copyright (C) 2015-2020 Ole André Vadla Ravnås <oleavr@nowsecure.com>
  *
  * Licence: wxWindows Library Licence, Version 3.1
  */
@@ -115,10 +115,15 @@ public:
   ~GumV8ForegroundTaskRunner () override;
 
   void PostTask (std::unique_ptr<Task> task) override;
+  void PostNonNestableTask (std::unique_ptr<Task> task) override;
   void PostDelayedTask (std::unique_ptr<Task> task,
+      double delay_in_seconds) override;
+  void PostNonNestableDelayedTask (std::unique_ptr<Task> task,
       double delay_in_seconds) override;
   void PostIdleTask (std::unique_ptr<IdleTask> task) override;
   bool IdleTasksEnabled () override;
+  bool NonNestableTasksEnabled () const override;
+  bool NonNestableDelayedTasksEnabled () const override;
 
 private:
   void Run (Task * task);
@@ -152,6 +157,8 @@ public:
   void * Allocate (size_t length) override;
   void * AllocateUninitialized (size_t length) override;
   void Free (void * data, size_t length) override;
+  void * Reallocate (void * data, size_t old_length, size_t new_length)
+      override;
 };
 
 class GumV8ThreadingBackend : public ThreadingBackend
@@ -700,30 +707,6 @@ GumV8Platform::CallDelayedOnWorkerThread (std::unique_ptr<Task> task,
       });
 }
 
-void
-GumV8Platform::CallOnForegroundThread (Isolate * isolate,
-                                       Task * task)
-{
-  GetForegroundTaskRunner (isolate)->PostTask (std::unique_ptr<Task> (task));
-}
-
-void
-GumV8Platform::CallDelayedOnForegroundThread (Isolate * isolate,
-                                              Task * task,
-                                              double delay_in_seconds)
-{
-  GetForegroundTaskRunner (isolate)->PostDelayedTask (
-      std::unique_ptr<Task> (task), delay_in_seconds);
-}
-
-void
-GumV8Platform::CallIdleOnForegroundThread (Isolate * isolate,
-                                           IdleTask * task)
-{
-  GetForegroundTaskRunner (isolate)->PostIdleTask (
-      std::unique_ptr<IdleTask> (task));
-}
-
 bool
 GumV8Platform::IdleTasksEnabled (Isolate * isolate)
 {
@@ -966,6 +949,12 @@ GumV8ForegroundTaskRunner::PostTask (std::unique_ptr<Task> task)
 }
 
 void
+GumV8ForegroundTaskRunner::PostNonNestableTask (std::unique_ptr<Task> task)
+{
+  PostTask (std::move (task));
+}
+
+void
 GumV8ForegroundTaskRunner::PostDelayedTask (std::unique_ptr<Task> task,
                                             double delay_in_seconds)
 {
@@ -974,6 +963,14 @@ GumV8ForegroundTaskRunner::PostDelayedTask (std::unique_ptr<Task> task,
       {
         Run (t.get ());
       });
+}
+
+void
+GumV8ForegroundTaskRunner::PostNonNestableDelayedTask (
+    std::unique_ptr<Task> task,
+    double delay_in_seconds)
+{
+  PostDelayedTask (std::move (task), delay_in_seconds);
 }
 
 void
@@ -988,6 +985,18 @@ GumV8ForegroundTaskRunner::PostIdleTask (std::unique_ptr<IdleTask> task)
 
 bool
 GumV8ForegroundTaskRunner::IdleTasksEnabled ()
+{
+  return true;
+}
+
+bool
+GumV8ForegroundTaskRunner::NonNestableTasksEnabled () const
+{
+  return true;
+}
+
+bool
+GumV8ForegroundTaskRunner::NonNestableDelayedTasksEnabled () const
 {
   return true;
 }
@@ -1144,6 +1153,14 @@ GumV8ArrayBufferAllocator::Free (void * data,
                                  size_t length)
 {
   g_free (data);
+}
+
+void *
+GumV8ArrayBufferAllocator::Reallocate (void * data,
+                                       size_t old_length,
+                                       size_t new_length)
+{
+  return gum_realloc (data, new_length);
 }
 
 MutexImpl *
