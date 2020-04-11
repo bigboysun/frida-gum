@@ -713,7 +713,7 @@ gum_thumb_relocator_patch_it_b_instrument (GumThumbITBlockPatch * patch,
 {
   gint16 distance;
   distance = target_addr - patch->pc - 4;
-  g_assert (distance > 0 && distance < 256);
+  g_assert (distance >= 0 && distance < 256);
   *patch->code = (*patch->code & 0xff00) | distance / 2;
 }
 
